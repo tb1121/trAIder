@@ -10,6 +10,20 @@ The product is built around a premium desk experience:
 - history and analysis views
 - a P&L calendar that can log trades directly from conversation
 
+## Screenshots
+
+### Login
+
+![trAIder login screen](./docs/screenshots/login-screen.png)
+
+### Desk entry
+
+![trAIder desk hero](./docs/screenshots/desk-hero.png)
+
+### Profile memory
+
+![trAIder profile memory rail](./docs/screenshots/profile-memory.png)
+
 ## Stack
 
 - Next.js App Router for the frontend and Vercel deployment target
