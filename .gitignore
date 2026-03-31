@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+*.egg-info/
+traider.db
+node_modules/
+.next/
+.env
+.env.local
+.env.*.local
+coverage/
+tsconfig.tsbuildinfo

@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>trAIder</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=Instrument+Serif:ital@0;1&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="page-shell">
+      <div class="ambient-grid" aria-hidden="true"></div>
+      <main class="hero">
+        <section class="intro-panel">
+          <p class="eyebrow">AI trading coach</p>
+          <h1 class="wordmark" aria-label="trAIder">
+            <span class="wordmark-tr">tr</span><span class="wordmark-ai">AI</span><span class="wordmark-der">der</span>
+          </h1>
+          <p class="tagline">
+            <span>simple.</span>
+            <span>smart.</span>
+            <span class="tagline-ai">AI</span>
+            <span>powered.</span>
+          </p>
+          <p class="summary">
+            Bring a chart screenshot, a live trade idea, a list of fills, or a beginner question.
+            trAIder responds like a calm, professional coach and builds your profile as you go.
+          </p>
+        </section>
+
+        <section class="chat-card">
+          <div class="chat-header">
+            <div>
+              <p class="chat-kicker">Live coaching</p>
+              <h2>Your desk is open</h2>
+            </div>
+            <div class="chat-meta">
+              <div class="chat-status">
+                <span class="status-dot"></span>
+                <span>Persistent profile</span>
+              </div>
+              <div class="desk-account">
+                <span id="desk-user">Signed in as {{ initial_bootstrap.user.display_name }}</span>
+                <form class="logout-form" action="/logout" method="post">
+                  <button id="logout-button" type="submit">Log out</button>
+                </form>
+              </div>
+            </div>
+          </div>
+
+          <div id="messages" class="messages" aria-live="polite">
+            {% if initial_bootstrap.messages %}
+              {% for message in initial_bootstrap.messages %}
+                <article class="message {{ message.role }}">
+                  <p>{{ message.content }}</p>
+                </article>
+              {% endfor %}
+            {% else %}
+            <article class="message assistant">
+              <p>{{ initial_bootstrap.workspace_intro }}</p>
+            </article>
+            {% endif %}
+          </div>
+
+          <div class="quick-prompts" aria-label="Prompt ideas">
+            <button class="prompt-chip" data-prompt="Review this trade setup for risk and structure.">
+              Review a setup
+            </button>
+            <button class="prompt-chip" data-prompt="Help me understand what makes a good entry and stop.">
+              Beginner guidance
+            </button>
+            <button class="prompt-chip" data-prompt="Build a profile for me as a swing trader.">
+              Build my profile
+            </button>
+          </div>
+
+          <form id="chat-form" class="composer">
+            <label class="upload-pill" for="attachment">
+              <span>+ screenshot</span>
+              <input id="attachment" name="attachment" type="file" accept="image/*,.pdf,.txt" />
+            </label>
+            <div class="composer-inputs">
+              <textarea
+                id="message"
+                name="message"
+                rows="3"
+                placeholder="Paste a trade, ask a question, or describe what you're seeing."
+                required
+              ></textarea>
+              <button id="send-button" type="submit">Coach me</button>
+            </div>
+          </form>
+
+          <div id="profile-pills" class="profile-pills"></div>
+        </section>
+      </main>
+    </div>
+    <script>
+      window.__TRAIDER_BOOTSTRAP__ = {{ initial_bootstrap | tojson }};
+    </script>
+    <script src="/static/app.js" defer></script>
+  </body>
+</html>

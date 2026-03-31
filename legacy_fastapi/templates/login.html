@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>trAIder Login</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=Instrument+Serif:ital@0;1&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <div class="page-shell auth-shell">
+      <div class="ambient-grid" aria-hidden="true"></div>
+      <main class="auth-layout">
+        <section class="auth-brand">
+          <p class="eyebrow">AI trading coach</p>
+          <h1 class="wordmark" aria-label="trAIder">
+            <span class="wordmark-tr">tr</span><span class="wordmark-ai">AI</span><span class="wordmark-der">der</span>
+          </h1>
+          <p class="tagline">
+            <span>simple.</span>
+            <span>smart.</span>
+            <span class="tagline-ai">AI</span>
+            <span>powered.</span>
+          </p>
+          <p class="summary">
+            Sign in to open your desk, keep your coaching history, and continue building your own trading profile over time.
+          </p>
+        </section>
+
+        <section class="auth-card auth-card-page">
+          <p class="eyebrow">Personal workspace</p>
+          <h2 class="auth-title">Sign in before the desk opens.</h2>
+          <p class="auth-copy">
+            Your login carries profile context, trade history, and coaching continuity across visits.
+          </p>
+
+          <div class="auth-tabs" aria-label="Account actions">
+            <button type="button" class="auth-tab is-active" data-mode="login">Sign in</button>
+            <button type="button" class="auth-tab" data-mode="register">Create account</button>
+          </div>
+
+          <form id="auth-form" class="auth-form" data-mode="login">
+            <label class="field name-field" for="display-name">
+              <span>Name</span>
+              <input id="display-name" name="display_name" type="text" placeholder="Taylor" />
+            </label>
+
+            <label class="field" for="auth-email">
+              <span>Email</span>
+              <input
+                id="auth-email"
+                name="email"
+                type="email"
+                placeholder="you@example.com"
+                autocomplete="email"
+                required
+              />
+            </label>
+
+            <label class="field" for="auth-password">
+              <span>Password</span>
+              <input
+                id="auth-password"
+                name="password"
+                type="password"
+                placeholder="At least 8 characters"
+                autocomplete="current-password"
+                required
+              />
+            </label>
+
+            <p id="auth-feedback" class="auth-feedback"></p>
+            <button id="auth-submit" class="auth-submit" type="submit">Continue to trAIder</button>
+          </form>
+        </section>
+      </main>
+    </div>
+    <script src="/static/auth.js" defer></script>
+  </body>
+</html>
