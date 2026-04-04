@@ -86,6 +86,9 @@ a {
 
 .workspace-shell-page {
   min-height: 100dvh;
+  --workspace-insight-icons-width: 3.65rem;
+  --workspace-insight-panel-width: 18rem;
+  --workspace-insight-safe-space: calc(var(--workspace-insight-icons-width) + 1rem);
 }
 
 .workspace-topbar {
@@ -2500,10 +2503,16 @@ a {
 }
 
 .workspace-shell-page .workspace-nav-link {
+  display: inline-flex;
+  align-items: center;
+  padding: 0;
+  border: 0;
+  background: transparent;
   color: rgba(65, 71, 85, 0.86);
   font-family: "Manrope", "Inter", sans-serif;
   font-size: 0.88rem;
   font-weight: 700;
+  cursor: pointer;
 }
 
 .workspace-shell-page .workspace-nav-link:hover,
@@ -2754,6 +2763,10 @@ a {
   padding-bottom: 1.5rem;
 }
 
+.workspace-shell-page .workspace-view-panel {
+  width: 100%;
+}
+
 .workspace-shell-page .workspace-shell-main.setup-state {
   display: grid;
   justify-items: center;
@@ -2950,6 +2963,149 @@ a {
   gap: 0.95rem;
 }
 
+.workspace-shell-page .workspace-analysis-performance-card {
+  gap: 0.95rem;
+}
+
+.workspace-shell-page .workspace-analysis-performance-top {
+  align-items: center;
+}
+
+.workspace-shell-page .workspace-analysis-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.28rem;
+  border: 1px solid rgba(193, 198, 215, 0.4);
+  border-radius: 999px;
+  background: rgba(247, 249, 255, 0.95);
+}
+
+.workspace-shell-page .workspace-analysis-toggle-button {
+  min-height: 2.15rem;
+  padding: 0 0.92rem;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--desk-muted);
+  font-family: "Inter", sans-serif;
+  font-size: 0.82rem;
+  font-weight: 700;
+  cursor: pointer;
+  transition:
+    color 0.18s ease,
+    background 0.18s ease,
+    box-shadow 0.18s ease;
+}
+
+.workspace-shell-page .workspace-analysis-toggle-button.active {
+  background: linear-gradient(180deg, rgba(18, 104, 235, 0.98), rgba(0, 88, 188, 0.94));
+  color: white;
+  box-shadow: 0 12px 26px rgba(0, 88, 188, 0.18);
+}
+
+.workspace-shell-page .workspace-analysis-performance-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 0.75rem;
+}
+
+.workspace-shell-page .workspace-analysis-performance-stat {
+  display: grid;
+  gap: 0.34rem;
+  padding: 0.9rem 0.95rem;
+  border: 1px solid rgba(193, 198, 215, 0.28);
+  border-radius: 1.1rem;
+  background: rgba(255, 255, 255, 0.82);
+}
+
+.workspace-shell-page .workspace-analysis-performance-stat-value {
+  color: var(--desk-text-strong);
+  font-family: "Manrope", "Inter", sans-serif;
+  font-size: 1.02rem;
+  font-weight: 800;
+  line-height: 1.3;
+}
+
+.workspace-shell-page .workspace-analysis-performance-stat-value.positive {
+  color: #0f9f55;
+}
+
+.workspace-shell-page .workspace-analysis-performance-stat-value.negative {
+  color: #d14343;
+}
+
+.workspace-shell-page .workspace-analysis-chart-shell {
+  padding: 0.55rem 0.2rem 0;
+}
+
+.workspace-shell-page .workspace-analysis-chart {
+  display: block;
+  width: 100%;
+  height: auto;
+  overflow: visible;
+}
+
+.workspace-shell-page .workspace-analysis-chart-gridline {
+  stroke: rgba(193, 198, 215, 0.32);
+  stroke-width: 1;
+}
+
+.workspace-shell-page .workspace-analysis-chart-baseline {
+  stroke: rgba(15, 23, 42, 0.2);
+  stroke-width: 1.15;
+}
+
+.workspace-shell-page .workspace-analysis-chart-axis-label,
+.workspace-shell-page .workspace-analysis-chart-column-label {
+  fill: rgba(113, 119, 134, 0.9);
+  font-family: "Inter", sans-serif;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.workspace-shell-page .workspace-analysis-chart-column-label {
+  text-anchor: middle;
+}
+
+.workspace-shell-page .workspace-analysis-chart-bar {
+  transition:
+    opacity 0.18s ease,
+    transform 0.18s ease;
+}
+
+.workspace-shell-page .workspace-analysis-chart-bar.positive {
+  fill: url(#workspace-analysis-chart-positive);
+}
+
+.workspace-shell-page .workspace-analysis-chart-bar.negative {
+  fill: url(#workspace-analysis-chart-negative);
+}
+
+.workspace-shell-page .workspace-analysis-chart-empty {
+  display: grid;
+  gap: 0.28rem;
+  align-items: center;
+  justify-items: start;
+  min-height: 14rem;
+  padding: 1rem 0.4rem 0.2rem;
+}
+
+.workspace-shell-page .workspace-analysis-chart-empty p {
+  margin: 0;
+  color: var(--desk-text-strong);
+  font-family: "Manrope", "Inter", sans-serif;
+  font-size: 1rem;
+  font-weight: 800;
+}
+
+.workspace-shell-page .workspace-analysis-chart-empty span {
+  color: var(--desk-muted);
+  font-family: "Inter", sans-serif;
+  font-size: 0.9rem;
+  line-height: 1.65;
+}
+
 .workspace-shell-page .workspace-analysis-card-top,
 .workspace-shell-page .workspace-history-card-top {
   display: flex;
@@ -3007,11 +3163,38 @@ a {
   border: 1px solid rgba(193, 198, 215, 0.3);
   border-radius: 1.15rem;
   background: rgba(255, 255, 255, 0.72);
+  text-align: left;
+  transition:
+    transform 0.18s ease,
+    border-color 0.18s ease,
+    box-shadow 0.18s ease,
+    background 0.18s ease;
 }
 
 .workspace-shell-page .workspace-analysis-calendar-cell.has-entry {
   border-color: rgba(193, 198, 215, 0.42);
   box-shadow: 0 12px 24px rgba(15, 23, 42, 0.04);
+}
+
+.workspace-shell-page .workspace-analysis-calendar-cell.interactive {
+  cursor: pointer;
+}
+
+.workspace-shell-page .workspace-analysis-calendar-cell.interactive:hover {
+  transform: translateY(-1px);
+  border-color: rgba(0, 88, 188, 0.26);
+  box-shadow: 0 16px 30px rgba(15, 23, 42, 0.06);
+}
+
+.workspace-shell-page .workspace-analysis-calendar-cell.selected {
+  border-color: rgba(0, 88, 188, 0.32);
+  box-shadow:
+    0 0 0 1px rgba(0, 88, 188, 0.08),
+    0 16px 30px rgba(15, 23, 42, 0.08);
+}
+
+.workspace-shell-page .workspace-analysis-calendar-cell.empty {
+  cursor: default;
 }
 
 .workspace-shell-page .workspace-analysis-calendar-cell.positive {
@@ -3047,6 +3230,79 @@ a {
   font-family: "Inter", sans-serif;
   font-size: 0.76rem;
   line-height: 1.45;
+}
+
+.workspace-shell-page .workspace-analysis-calendar-detail {
+  display: grid;
+  gap: 0.75rem;
+  margin-top: 0.35rem;
+  padding: 0.95rem 1rem;
+  border: 1px solid rgba(193, 198, 215, 0.32);
+  border-radius: 1.3rem;
+  background: rgba(255, 255, 255, 0.82);
+}
+
+.workspace-shell-page .workspace-analysis-calendar-detail-top {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 0.8rem;
+}
+
+.workspace-shell-page .workspace-analysis-calendar-detail-title {
+  margin: 0.28rem 0 0;
+  color: var(--desk-text-strong);
+  font-family: "Manrope", "Inter", sans-serif;
+  font-size: 1.02rem;
+  font-weight: 800;
+}
+
+.workspace-shell-page .workspace-analysis-calendar-detail-list {
+  display: grid;
+  gap: 0.6rem;
+}
+
+.workspace-shell-page .workspace-analysis-calendar-detail-row {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.82rem 0.9rem;
+  border: 1px solid rgba(193, 198, 215, 0.24);
+  border-radius: 1rem;
+  background: rgba(250, 249, 254, 0.9);
+}
+
+.workspace-shell-page .workspace-analysis-calendar-detail-row strong {
+  color: var(--desk-text-strong);
+  font-family: "Manrope", "Inter", sans-serif;
+}
+
+.workspace-shell-page .workspace-analysis-calendar-detail-row p,
+.workspace-shell-page .workspace-analysis-calendar-detail-note {
+  margin: 0.25rem 0 0;
+  color: var(--desk-muted);
+  font-family: "Inter", sans-serif;
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+
+.workspace-shell-page .workspace-analysis-calendar-detail-note {
+  display: inline-block;
+}
+
+.workspace-shell-page .workspace-analysis-calendar-detail-row > strong.positive,
+.workspace-shell-page .workspace-analysis-calendar-detail-row > strong.negative {
+  font-size: 0.96rem;
+  font-weight: 800;
+}
+
+.workspace-shell-page .workspace-analysis-calendar-detail-row > strong.positive {
+  color: #0f9f55;
+}
+
+.workspace-shell-page .workspace-analysis-calendar-detail-row > strong.negative {
+  color: #d14343;
 }
 
 .workspace-shell-page .workspace-analysis-trade-list {
@@ -3733,6 +3989,61 @@ a {
   pointer-events: auto;
 }
 
+.workspace-shell-page .oracle-inline-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin: 0.18rem 0 0.1rem 0.2rem;
+  animation: oracle-inline-actions-arrive 0.34s cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.workspace-shell-page .oracle-inline-action {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.48rem;
+  min-height: 2.2rem;
+  padding: 0 0.92rem;
+  border: 1px solid rgba(193, 198, 215, 0.4);
+  border-radius: 999px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(247, 250, 255, 0.94));
+  color: var(--desk-text);
+  font-family: "Inter", sans-serif;
+  font-size: 0.82rem;
+  font-weight: 700;
+  box-shadow:
+    0 14px 28px rgba(15, 23, 42, 0.05),
+    0 1px 0 rgba(255, 255, 255, 0.72) inset;
+  backdrop-filter: blur(12px);
+  cursor: pointer;
+  transition:
+    transform 0.18s ease,
+    border-color 0.18s ease,
+    color 0.18s ease,
+    box-shadow 0.18s ease,
+    background 0.18s ease;
+}
+
+.workspace-shell-page .oracle-inline-action:hover {
+  transform: translateY(-1px);
+  border-color: rgba(0, 88, 188, 0.22);
+  color: var(--desk-primary);
+  box-shadow:
+    0 18px 34px rgba(15, 23, 42, 0.07),
+    0 1px 0 rgba(255, 255, 255, 0.82) inset;
+}
+
+.workspace-shell-page .oracle-inline-action-submit {
+  background:
+    linear-gradient(180deg, rgba(239, 247, 255, 0.98), rgba(229, 241, 255, 0.94));
+}
+
+.workspace-shell-page .oracle-inline-action-icon {
+  width: 0.92rem;
+  height: 0.92rem;
+  flex: 0 0 auto;
+}
+
 .workspace-shell-page .oracle-bubble-actions-user {
   justify-self: end;
   margin-left: 0;
@@ -3782,6 +4093,19 @@ a {
   width: 0.92rem;
   height: 0.92rem;
   display: block;
+}
+
+@keyframes oracle-inline-actions-arrive {
+  0% {
+    opacity: 0;
+    transform: translateY(-0.45rem) scale(0.96);
+    filter: blur(6px);
+  }
+  100% {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+    filter: blur(0);
+  }
 }
 
 .workspace-shell-page .oracle-entry-editor-shell {
@@ -4094,7 +4418,13 @@ a {
 }
 
 .workspace-shell-page .oracle-context-card-top {
-  align-items: center;
+  align-items: flex-start;
+  gap: 0.9rem;
+}
+
+.workspace-shell-page .oracle-context-card-top > div {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 .workspace-shell-page .chat-kicker,
@@ -4114,9 +4444,10 @@ a {
 }
 
 .workspace-shell-page .oracle-context-card h3 {
-  margin: 0.2rem 0 0;
+  margin: 0.22rem 0 0.18rem;
   font-size: 2.1rem;
-  line-height: 0.95;
+  line-height: 1.03;
+  letter-spacing: -0.035em;
 }
 
 .workspace-shell-page .oracle-context-value,
@@ -4328,6 +4659,8 @@ a {
 }
 
 .workspace-shell-page .status-badge {
+  flex: 0 0 auto;
+  align-self: flex-start;
   border-color: rgba(46, 227, 120, 0.24);
   background: rgba(83, 253, 142, 0.12);
   color: #006d34;
@@ -4356,9 +4689,19 @@ a {
 }
 
 .workspace-shell-page .profile-pill {
+  display: inline-flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  row-gap: 0.18rem;
+  max-width: 100%;
   background: rgba(0, 88, 188, 0.06);
   border-color: rgba(0, 88, 188, 0.08);
   color: var(--desk-primary);
+}
+
+.workspace-shell-page .profile-pill-value {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 
 .workspace-shell-page .memory-meter-label {
@@ -4521,6 +4864,10 @@ a {
     grid-column: span 6;
   }
 
+  .workspace-shell-page .workspace-analysis-performance-stats {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
   .workspace-shell-page .oracle-desk {
     grid-template-columns: 15rem minmax(0, 1fr);
     height: auto;
@@ -4644,6 +4991,25 @@ a {
     flex-direction: column;
   }
 
+  .workspace-shell-page .workspace-analysis-performance-top {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .workspace-shell-page .workspace-analysis-toggle {
+    width: 100%;
+    justify-content: space-between;
+  }
+
+  .workspace-shell-page .workspace-analysis-toggle-button {
+    flex: 1 1 0;
+    padding-inline: 0.7rem;
+  }
+
+  .workspace-shell-page .workspace-analysis-performance-stats {
+    grid-template-columns: 1fr;
+  }
+
   .workspace-shell-page .workspace-analysis-calendar-head,
   .workspace-shell-page .workspace-analysis-calendar-grid {
     gap: 0.4rem;
@@ -4664,9 +5030,24 @@ a {
     text-align: left;
   }
 
+  .workspace-shell-page .workspace-analysis-calendar-detail-top,
+  .workspace-shell-page .workspace-analysis-calendar-detail-row {
+    flex-direction: column;
+  }
+
   .workspace-shell-page .workspace-analysis-action,
   .workspace-shell-page .workspace-section-link {
     width: 100%;
+  }
+
+  .workspace-shell-page .oracle-inline-actions {
+    gap: 0.5rem;
+    margin-left: 0;
+  }
+
+  .workspace-shell-page .oracle-inline-action {
+    width: 100%;
+    justify-content: center;
   }
 
   .workspace-shell-page .oracle-entry-meta {
@@ -4799,7 +5180,8 @@ a {
   height: calc(100dvh - 7.2rem);
   max-height: calc(100dvh - 7.2rem);
   min-height: 0;
-  padding-inline: 0;
+  padding-left: 0;
+  padding-right: var(--workspace-insight-safe-space);
 }
 
 .workspace-shell-page .oracle-stage-intro {
@@ -4911,15 +5293,43 @@ a {
 }
 
 .workspace-shell-page .oracle-insight-panel.open {
-  width: min(18rem, calc(100vw - 6rem));
-  max-width: min(18rem, calc(100vw - 6rem));
+  width: min(var(--workspace-insight-panel-width), calc(100vw - 6rem));
+  max-width: min(var(--workspace-insight-panel-width), calc(100vw - 6rem));
   opacity: 1;
   transform: translateX(0);
 }
 
 .workspace-shell-page .oracle-insight-panel > .oracle-context-card,
 .workspace-shell-page .oracle-insight-panel > .oracle-signal-card {
-  min-width: min(18rem, calc(100vw - 6rem));
+  min-width: min(var(--workspace-insight-panel-width), calc(100vw - 6rem));
+}
+
+@supports selector(.workspace-shell-page .oracle-desk:has(.oracle-context-rail.open)) {
+  .workspace-shell-page .oracle-desk:has(.oracle-context-rail.open) .oracle-main-stage {
+    padding-right: min(
+      calc(var(--workspace-insight-icons-width) + var(--workspace-insight-panel-width) + 1.75rem),
+      calc(100vw - 6rem)
+    );
+  }
+}
+
+@media (max-width: 1512px) {
+  .workspace-shell-page {
+    --workspace-insight-icons-width: 3.3rem;
+    --workspace-insight-panel-width: 16rem;
+    --workspace-insight-safe-space: calc(var(--workspace-insight-icons-width) + 0.85rem);
+  }
+
+  .workspace-shell-page .oracle-context-rail {
+    right: 0.5rem;
+    gap: 0.6rem;
+  }
+
+  .workspace-shell-page .oracle-insight-icon {
+    width: 2.65rem;
+    height: 2.65rem;
+    border-radius: 0.9rem;
+  }
 }
 
 @media (max-width: 1240px) {
@@ -4934,6 +5344,7 @@ a {
     height: auto;
     max-height: none;
     min-height: calc(100dvh - 20rem);
+    padding-right: 0;
   }
 
   .workspace-shell-page .oracle-context-rail {
@@ -5176,32 +5587,27 @@ a {
   --desk-green: #2ee378;
   min-height: 100dvh;
   color: var(--desk-text);
-  background:
-    radial-gradient(circle at 12% 8%, rgba(173, 198, 255, 0.38), transparent 18%),
-    radial-gradient(circle at 86% 10%, rgba(98, 255, 149, 0.18), transparent 16%),
-    linear-gradient(180deg, #fcfbff 0%, #f6f5fb 100%);
+  background: #faf9fe;
 }
 
 .auth-shell::before {
   content: "";
   position: absolute;
-  inset: auto 0 0;
-  height: 24rem;
-  background:
-    radial-gradient(circle at 30% 40%, rgba(173, 198, 255, 0.26), transparent 38%),
-    radial-gradient(circle at 70% 30%, rgba(98, 255, 149, 0.18), transparent 34%);
-  filter: blur(80px);
-  opacity: 0.9;
+  inset: 0;
   pointer-events: none;
+  background:
+    radial-gradient(circle 24rem at 12% 10%, rgba(218, 188, 255, 0.18), transparent 58%),
+    radial-gradient(circle 22rem at 88% 14%, rgba(154, 255, 190, 0.14), transparent 54%),
+    radial-gradient(circle 18rem at 78% 82%, rgba(198, 232, 255, 0.1), transparent 52%);
+  filter: blur(34px);
+  opacity: 0.92;
 }
 
 .auth-shell .ambient-grid {
-  background-image:
-    linear-gradient(rgba(0, 88, 188, 0.04) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(0, 88, 188, 0.04) 1px, transparent 1px);
+  background-image: linear-gradient(90deg, rgba(0, 88, 188, 0.032) 1px, transparent 1px);
   background-size: 40px 40px;
   mask-image: none;
-  opacity: 1;
+  opacity: 0.62;
 }
 
 .auth-shell .auth-layout {

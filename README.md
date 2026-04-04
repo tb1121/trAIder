@@ -74,7 +74,7 @@ OPENAI_API_KEY=your_openai_key
 Optional values:
 
 ```bash
-OPENAI_MODEL=gpt-4.1-mini
+OPENAI_MODEL=gpt-5.4-mini
 FMP_API_KEY=your_fmp_key_here
 GOOGLE_SEARCH_API_KEY=your_google_search_key_here
 GOOGLE_SEARCH_CX=your_programmable_search_engine_id_here

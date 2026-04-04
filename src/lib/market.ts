@@ -19,6 +19,7 @@ export type MarketSnapshot = {
 };
 
 const TICKER_PATTERN = /^[A-Z][A-Z0-9.-]{0,9}$/;
+const DISALLOWED_MARKET_TICKERS = new Set(["PL", "PNL"]);
 
 export function parseTickerList(value: string | null | undefined) {
   if (!value) {
@@ -28,7 +29,7 @@ export function parseTickerList(value: string | null | undefined) {
   const unique = new Set<string>();
   for (const segment of value.split(/[,\s/]+/)) {
     const ticker = segment.replace(/^\$+/, "").trim().toUpperCase();
-    if (!ticker || !TICKER_PATTERN.test(ticker)) {
+    if (!ticker || !TICKER_PATTERN.test(ticker) || DISALLOWED_MARKET_TICKERS.has(ticker)) {
       continue;
     }
     unique.add(ticker);

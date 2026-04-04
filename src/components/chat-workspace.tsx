@@ -4,9 +4,9 @@ import type { ReactNode } from "react";
 import { useEffect, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { formatDisplayNameCandidate } from "@/lib/display-name";
-import type { TradingProfile, WorkspaceMessage } from "@/lib/coach";
+import type { TradingProfile, WorkspaceMessage, WorkspaceQuickAction } from "@/lib/coach";
 import type { ConversationSummary, WorkspaceNotification } from "@/lib/data";
-import type { TradeCalendarNotice } from "@/lib/trade-calendar";
+import type { TradeCalendarEntry, TradeCalendarNotice } from "@/lib/trade-calendar";
 
 type ChatWorkspaceProps = {
   deskTitle: string;
@@ -16,6 +16,7 @@ type ChatWorkspaceProps = {
   initialIntro: string;
   initialIntroTimestamp: string;
   initialMessages: WorkspaceMessage[];
+  onStartNewChat?: () => void;
   initialProfile: TradingProfile;
   initialShowHero?: boolean;
   userName: string;
@@ -35,6 +36,7 @@ const PROFILE_FIELD_ORDER: ProfileFieldKey[] = [
   "preferred_assets",
   "strategy_style",
   "risk_tolerance",
+  "trading_rules",
   "trading_goal",
   "experience_level"
 ];
@@ -43,6 +45,7 @@ const PROFILE_FIELD_DISPLAY_LABELS: Record<ProfileFieldKey, string> = {
   focus_tickers: "focus tickers",
   preferred_assets: "preferred assets",
   strategy_style: "strategies",
+  trading_rules: "rules",
   risk_tolerance: "risk tolerance",
   trading_goal: "trading goal"
 };
@@ -72,6 +75,8 @@ type ChatStreamDoneEvent = {
   conversationTitle: string;
   notifications: WorkspaceNotification[];
   profile: TradingProfile;
+  quickActions: WorkspaceQuickAction[];
+  tradeCalendarEntry: TradeCalendarEntry | null;
   tradeCalendarNotice: TradeCalendarNotice | null;
   type: "done";
   userAttachmentDataUrl: string | null;
@@ -192,6 +197,49 @@ function StopIcon() {
   return (
     <svg aria-hidden="true" className="oracle-send-icon oracle-send-icon-stop" viewBox="0 0 20 20">
       <rect x="5.1" y="5.1" width="9.8" height="9.8" rx="2.2" fill="currentColor" />
+    </svg>
+  );
+}
+
+function QuickActionGlyph({ kind }: { kind: WorkspaceQuickAction["kind"] }) {
+  if (kind === "prefill") {
+    return (
+      <svg aria-hidden="true" className="oracle-inline-action-icon" viewBox="0 0 20 20">
+        <path
+          d="M4.1 14.8l3-.6 7-7a1.5 1.5 0 0 0-2.2-2.2l-7 7-.8 2.8z"
+          fill="none"
+          stroke="currentColor"
+          strokeLinejoin="round"
+          strokeWidth="1.45"
+        />
+        <path
+          d="M10.6 5.5l3.9 3.9"
+          fill="none"
+          stroke="currentColor"
+          strokeLinecap="round"
+          strokeWidth="1.45"
+        />
+      </svg>
+    );
+  }
+
+  return (
+    <svg aria-hidden="true" className="oracle-inline-action-icon" viewBox="0 0 20 20">
+      <path
+        d="M4.4 10.2h9.2"
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeWidth="1.55"
+      />
+      <path
+        d="M10.6 6.4l3.8 3.8-3.8 3.4"
+        fill="none"
+        stroke="currentColor"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        strokeWidth="1.55"
+      />
     </svg>
   );
 }
@@ -552,6 +600,7 @@ function parseFocusTickerList(value: string | null | undefined) {
   return value
     .split(",")
     .map((ticker) => ticker.trim().toUpperCase())
+    .filter((ticker) => ticker !== "PL" && ticker !== "PNL")
     .filter(Boolean);
 }
 
@@ -708,6 +757,14 @@ function formatProfileFieldString(key: ProfileFieldKey, value: string | null | u
       .join(", ");
   }
 
+  if (key === "trading_rules") {
+    return value
+      .split(/\s*\|\s*|\n+/)
+      .map((segment) => segment.trim())
+      .filter(Boolean)
+      .join(" · ");
+  }
+
   return titleizePhrase(value) ?? value;
 }
 
@@ -794,6 +851,7 @@ export function ChatWorkspace({
   initialIntro,
   initialIntroTimestamp,
   initialMessages,
+  onStartNewChat,
   initialProfile,
   initialShowHero = false,
   userName
@@ -804,6 +862,7 @@ export function ChatWorkspace({
   const messagesRef = useRef<HTMLDivElement | null>(null);
   const stageRef = useRef<HTMLElement | null>(null);
   const editingTextareaRef = useRef<HTMLTextAreaElement | null>(null);
+  const composerTextareaRef = useRef<HTMLTextAreaElement | null>(null);
   const [conversationId, setConversationId] = useState(initialConversationId);
   const [displayName, setDisplayName] = useState(safeInitialDisplayName);
   const [isDrawerOpen, setIsDrawerOpen] = useState(false);
@@ -1018,6 +1077,11 @@ export function ChatWorkspace({
 
   function startNewChat() {
     setIsDrawerOpen(false);
+    if (onStartNewChat) {
+      onStartNewChat();
+      return;
+    }
+
     startRouting(() => {
       router.push("/workspace?new=1");
     });
@@ -1057,7 +1121,16 @@ export function ChatWorkspace({
     let streamedAssistantText = "";
     abortControllerRef.current = controller;
     setMessages((current) => {
-      const next = baseMessages ? [...baseMessages] : [...current];
+      const next = baseMessages
+        ? [...baseMessages]
+        : current.map((entry) =>
+            entry.role === "assistant" && entry.quickActions?.length
+              ? {
+                  ...entry,
+                  quickActions: []
+                }
+              : entry
+          );
       next.push({
         attachmentDataUrl: optimisticAttachmentDataUrl,
         attachmentName: submittedAttachment?.name ?? null,
@@ -1347,7 +1420,8 @@ export function ChatWorkspace({
         next.push({
           createdAt: data.assistantMessageCreatedAt,
           role: "assistant",
-          content: data.assistantMessage
+          content: data.assistantMessage,
+          quickActions: data.quickActions
         });
         return next;
       });
@@ -1361,6 +1435,22 @@ export function ChatWorkspace({
         title: data.conversationTitle?.trim() || "New chat",
         updatedAt: data.assistantMessageCreatedAt
       });
+      window.dispatchEvent(
+        new CustomEvent("trader:workspace:sync", {
+          detail: {
+            conversationId: data.conversationId,
+            conversationSummary: {
+              id: data.conversationId,
+              preview: data.assistantMessage.replace(/\s+/g, " ").trim().slice(0, 72),
+              title: data.conversationTitle?.trim() || "New chat",
+              updatedAt: data.assistantMessageCreatedAt
+            },
+            profile: data.profile,
+            tradeCalendarEntry: data.tradeCalendarEntry,
+            userName: data.userName
+          }
+        })
+      );
       if (data.notifications.length) {
         window.dispatchEvent(
           new CustomEvent("trader:notifications:add", {
@@ -1505,6 +1595,44 @@ export function ChatWorkspace({
 
     setMessage(prompt);
     await submitMessage(prompt);
+  }
+
+  function dismissMessageQuickActions(messageKey: string) {
+    setMessages((current) =>
+      current.map((entry, index) =>
+        getMessageActionKey(entry, index) === messageKey
+          ? {
+              ...entry,
+              quickActions: []
+            }
+          : entry
+      )
+    );
+  }
+
+  async function handleMessageQuickAction(
+    action: WorkspaceQuickAction,
+    messageKey: string
+  ) {
+    if (isResponding) {
+      return;
+    }
+
+    dismissMessageQuickActions(messageKey);
+
+    if (action.kind === "prefill") {
+      setMessage(action.prompt);
+      composerTextareaRef.current?.focus();
+      return;
+    }
+
+    if (message.trim() || attachment) {
+      setMessage(action.prompt);
+      composerTextareaRef.current?.focus();
+      return;
+    }
+
+    await submitMessage(action.prompt);
   }
 
   async function handleComposerKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
@@ -1954,32 +2082,49 @@ export function ChatWorkspace({
                   )}
                 </div>
                 {!isEditingMessage ? (
-                  <div className={`oracle-bubble-actions oracle-bubble-actions-${entry.role}`}>
-                    <button
-                      aria-label={
-                        copiedMessageKey === messageKey ? "Message copied" : "Copy message"
-                      }
-                      className={`oracle-bubble-action ${
-                        copiedMessageKey === messageKey ? "copied" : ""
-                      }`}
-                      onClick={() => void copyMessageContent(entry.content, messageKey)}
-                      title={copiedMessageKey === messageKey ? "Copied" : "Copy"}
-                      type="button"
-                    >
-                      <CopyIcon copied={copiedMessageKey === messageKey} />
-                    </button>
-                    {entry.role === "user" ? (
+                  <>
+                    {entry.role === "assistant" && entry.quickActions?.length ? (
+                      <div className="oracle-inline-actions" role="group" aria-label="Suggested next steps">
+                        {entry.quickActions.map((action) => (
+                          <button
+                            className={`oracle-inline-action oracle-inline-action-${action.kind}`}
+                            key={`${messageKey}-${action.label}`}
+                            onClick={() => void handleMessageQuickAction(action, messageKey)}
+                            type="button"
+                          >
+                            <QuickActionGlyph kind={action.kind} />
+                            <span>{action.label}</span>
+                          </button>
+                        ))}
+                      </div>
+                    ) : null}
+                    <div className={`oracle-bubble-actions oracle-bubble-actions-${entry.role}`}>
                       <button
-                        aria-label="Edit and resend message"
-                        className="oracle-bubble-action"
-                        onClick={() => beginMessageEdit(entry.content, messageKey)}
-                        title="Edit and resend"
+                        aria-label={
+                          copiedMessageKey === messageKey ? "Message copied" : "Copy message"
+                        }
+                        className={`oracle-bubble-action ${
+                          copiedMessageKey === messageKey ? "copied" : ""
+                        }`}
+                        onClick={() => void copyMessageContent(entry.content, messageKey)}
+                        title={copiedMessageKey === messageKey ? "Copied" : "Copy"}
                         type="button"
                       >
-                        <EditIcon />
+                        <CopyIcon copied={copiedMessageKey === messageKey} />
                       </button>
-                    ) : null}
-                  </div>
+                      {entry.role === "user" ? (
+                        <button
+                          aria-label="Edit and resend message"
+                          className="oracle-bubble-action"
+                          onClick={() => beginMessageEdit(entry.content, messageKey)}
+                          title="Edit and resend"
+                          type="button"
+                        >
+                          <EditIcon />
+                        </button>
+                      ) : null}
+                    </div>
+                  </>
                 ) : null}
               </div>
                   </>
@@ -2047,6 +2192,7 @@ export function ChatWorkspace({
 
           <div className="oracle-composer-main">
             <textarea
+              ref={composerTextareaRef}
               name="message"
               onChange={(event) => setMessage(event.target.value)}
               onKeyDown={handleComposerKeyDown}
@@ -2121,7 +2267,7 @@ export function ChatWorkspace({
                 </div>
                 <span className="status-badge">
                   <span className="status-dot" />
-                  Supabase
+                  Active
                 </span>
               </div>
 

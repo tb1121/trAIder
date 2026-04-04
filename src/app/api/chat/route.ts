@@ -6,10 +6,12 @@ import {
   deleteTradeCaptureDraft,
   deleteConversationMessagesFrom,
   ensureProfile,
+  getTradeCalendarEntryById,
   getTradeCaptureDraft,
   getConversationById,
   getConversationMessages,
   getOrCreateConversation,
+  listTradeCalendarEntries,
   maybeUpdateConversationTitle,
   recordDeskNotifications,
   recordProfileNotifications,
@@ -20,16 +22,22 @@ import {
   updateStoredProfile
 } from "@/lib/data";
 import {
+  buildFocusTickerQuickActionsForTurn,
   extractProfileUpdates,
   fallbackConversationTitle,
   generateCoachReplyResult,
-  summarizeProfileUpdate
+  summarizeProfileUpdate,
+  type WorkspaceQuickAction
 } from "@/lib/coach";
 import {
   buildTradeCalendarNotice,
+  buildTradeCalendarSavedReply,
   normalizeTradeCalendarTickers,
   resolveTradeCaptureTurn,
-  type TradeCalendarNotice
+  seedTradeCaptureDraftFromMessage,
+  type TradeCalendarEntry,
+  type TradeCalendarNotice,
+  type TradeCaptureDraft
 } from "@/lib/trade-calendar";
 
 export const runtime = "nodejs";
@@ -48,6 +56,95 @@ function isAbortError(error: unknown) {
   );
 }
 
+function looksLikeTradeCalendarInvite(message: string) {
+  return (
+    /add it to your p&l calendar/i.test(message) ||
+    /do you want me to add it to your p&l calendar/i.test(message) ||
+    /do you want to log this .* p&l calendar/i.test(message)
+  );
+}
+
+function looksLikeTradeCalendarMissingReply(message: string) {
+  return (
+    /i still need the .* for the entry/i.test(message) ||
+    /i still need the .* before i save (?:the )?entry/i.test(message) ||
+    /i can keep logging this trade\./i.test(message)
+  );
+}
+
+function looksLikeTradeCalendarSavedReplyMessage(message: string) {
+  return (
+    /your trade is now logged to the p&l calendar/i.test(message) ||
+    /i(?:'|’)ve logged your .*p&l calendar/i.test(message) ||
+    /i saved .* realized p&l/i.test(message)
+  );
+}
+
+function looksLikeTradeCalendarPrompt(message: string) {
+  if (looksLikeTradeCalendarSavedReplyMessage(message)) {
+    return false;
+  }
+
+  return (
+    looksLikeTradeCalendarInvite(message) ||
+    looksLikeTradeCalendarMissingReply(message) ||
+    /i can log that to your p&l calendar/i.test(message) ||
+    /any notes you want included/i.test(message) ||
+    /say ["']?no notes["']?.*log it as-is/i.test(message)
+  );
+}
+
+function looksLikeTradeCalendarAffirmation(message: string) {
+  return /\b(yes|yeah|yep|yup|sure|please do|do it|go ahead|sounds good|log it|add it|save it|record it|that works|ok|okay)\b/i.test(
+    message
+  );
+}
+
+function buildTradeCalendarQuickActions(input: {
+  confirmedTradeCalendarEntry: TradeCalendarEntry | null;
+  tradeCaptureTurn: ReturnType<typeof resolveTradeCaptureTurn>;
+}): WorkspaceQuickAction[] {
+  if (input.confirmedTradeCalendarEntry) {
+    return [];
+  }
+
+  if (input.tradeCaptureTurn.mode !== "reply") {
+    return [];
+  }
+
+  const nextDraft = input.tradeCaptureTurn.nextDraft;
+  if (!nextDraft) {
+    return [];
+  }
+
+  if (nextDraft.status === "pending_confirmation") {
+    return [
+      {
+        kind: "submit",
+        label: "Add to P&L calendar",
+        prompt: "Yeah, add it to my P&L calendar."
+      }
+    ];
+  }
+
+  if (nextDraft.tickers.length > 0 && nextDraft.pnlAmount !== null) {
+    return [
+      {
+        kind: "submit",
+        label: "No notes",
+        prompt: "No notes."
+      },
+      {
+        kind: "prefill",
+        label: "Add notes",
+        prompt: "Notes: "
+      }
+    ];
+  }
+
+  return [];
+}
+
 function getCurrentTradeDate() {
   const parts = new Intl.DateTimeFormat("en-US", {
     day: "2-digit",
@@ -59,6 +156,232 @@ function getCurrentTradeDate() {
   const month = parts.find((part) => part.type === "month")?.value ?? "01";
   const day = parts.find((part) => part.type === "day")?.value ?? "01";
   return `${year}-${month}-${day}`;
+}
+
+function parseDateKeyAsUtc(value: string) {
+  const [year, month, day] = value.split("-").map((part) => Number(part));
+  return new Date(Date.UTC(year, (month || 1) - 1, day || 1));
+}
+
+function formatUtcDateKey(date: Date) {
+  const year = date.getUTCFullYear();
+  const month = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const day = String(date.getUTCDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function getWeekStartKey(currentDate: string) {
+  const parsed = parseDateKeyAsUtc(currentDate);
+  const offset = parsed.getUTCDay();
+  parsed.setUTCDate(parsed.getUTCDate() - offset);
+  return formatUtcDateKey(parsed);
+}
+
+function getMonthStartKey(currentDate: string) {
+  const parsed = parseDateKeyAsUtc(currentDate);
+  parsed.setUTCDate(1);
+  return formatUtcDateKey(parsed);
+}
+
+function getYearStartKey(currentDate: string) {
+  const parsed = parseDateKeyAsUtc(currentDate);
+  parsed.setUTCMonth(0, 1);
+  return formatUtcDateKey(parsed);
+}
+
+function formatSignedPnl(amount: number) {
+  const absolute = Math.abs(amount).toLocaleString("en-US", {
+    maximumFractionDigits: 2,
+    minimumFractionDigits: amount % 1 === 0 ? 0 : 2
+  });
+
+  if (amount > 0) {
+    return `+$${absolute}`;
+  }
+
+  if (amount < 0) {
+    return `-$${absolute}`;
+  }
+
+  return "$0";
+}
+
+function buildTickerPnlBreakdown(entries: TradeCalendarEntry[]) {
+  const grouped = new Map<string, number>();
+
+  for (const entry of entries) {
+    if (!entry.tickers.length) {
+      continue;
+    }
+
+    const share = entry.pnlAmount / entry.tickers.length;
+    for (const ticker of entry.tickers) {
+      grouped.set(ticker, (grouped.get(ticker) ?? 0) + share);
+    }
+  }
+
+  return Array.from(grouped.entries())
+    .sort((left, right) => Math.abs(right[1]) - Math.abs(left[1]))
+    .slice(0, 4)
+    .map(([ticker, pnl]) => `${ticker} ${formatSignedPnl(pnl)}`);
+}
+
+function buildTradeCalendarContextBrief(entries: TradeCalendarEntry[], currentDate: string) {
+  if (!entries.length) {
+    return "No saved P&L calendar entries yet.";
+  }
+
+  const weekStart = getWeekStartKey(currentDate);
+  const monthStart = getMonthStartKey(currentDate);
+  const yearStart = getYearStartKey(currentDate);
+  const todayEntries = entries.filter((entry) => entry.tradedOn === currentDate);
+  const weekEntries = entries.filter((entry) => entry.tradedOn >= weekStart);
+  const monthEntries = entries.filter((entry) => entry.tradedOn >= monthStart);
+  const yearEntries = entries.filter((entry) => entry.tradedOn >= yearStart);
+  const summarize = (label: string, scopedEntries: TradeCalendarEntry[]) => {
+    if (!scopedEntries.length) {
+      return `${label}: no logged trades`;
+    }
+
+    const net = scopedEntries.reduce((sum, entry) => sum + entry.pnlAmount, 0);
+    return `${label}: ${formatSignedPnl(net)} across ${scopedEntries.length} trade${
+      scopedEntries.length === 1 ? "" : "s"
+    }`;
+  };
+  const recentEntries = entries
+    .slice(0, 3)
+    .map((entry) => `${entry.tradedOn} ${entry.tickers.join(", ")} ${formatSignedPnl(entry.pnlAmount)}`);
+
+  return [
+    summarize("Today", todayEntries),
+    summarize("This week", weekEntries),
+    summarize("This month", monthEntries),
+    summarize("This year", yearEntries),
+    recentEntries.length ? `Recent entries: ${recentEntries.join("; ")}` : null
+  ]
+    .filter(Boolean)
+    .join(" | ");
+}
+
+function isTradeCalendarSummaryQuery(message: string) {
+  return (
+    /\b(?:how much did i make|how much am i (?:up|down)|what did i make|what am i (?:up|down)|check my p(?:&|and)?l|check my pl|check my calendar|what(?:'s| is) my p(?:&|and)?l|how did i do|sum up my day)\b/i.test(
+      message
+    ) ||
+    (/\b(?:p(?:&|and)?l|pl|calendar)\b/i.test(message) &&
+      /\b(?:today|week|month|year|ytd|so far|check|show|pull|read|total)\b/i.test(message))
+  );
+}
+
+function buildTradeCalendarSummaryReply(entries: TradeCalendarEntry[], message: string, currentDate: string) {
+  const normalized = message.toLowerCase();
+  const weekStart = getWeekStartKey(currentDate);
+  const monthStart = getMonthStartKey(currentDate);
+  const yearStart = getYearStartKey(currentDate);
+
+  let label = "today";
+  let scopedEntries = entries.filter((entry) => entry.tradedOn === currentDate);
+
+  if (/\b(?:ytd|year|yearly)\b/i.test(normalized)) {
+    label = "this year";
+    scopedEntries = entries.filter((entry) => entry.tradedOn >= yearStart);
+  } else if (/\b(?:month|monthly)\b/i.test(normalized)) {
+    label = "this month";
+    scopedEntries = entries.filter((entry) => entry.tradedOn >= monthStart);
+  } else if (/\b(?:week|weekly)\b/i.test(normalized)) {
+    label = "this week";
+    scopedEntries = entries.filter((entry) => entry.tradedOn >= weekStart);
+  }
+
+  if (!scopedEntries.length) {
+    return `You don't have any logged trades in your P&L calendar for ${label} yet.`;
+  }
+
+  const net = scopedEntries.reduce((sum, entry) => sum + entry.pnlAmount, 0);
+  const tradeCount = scopedEntries.length;
+  const breakdown = buildTickerPnlBreakdown(scopedEntries);
+  const amountLabel = formatSignedPnl(Math.abs(net)).replace("+", "");
+  const lead =
+    net > 0
+      ? `You're up ${amountLabel} for ${label}`
+      : net < 0
+        ? `You're down ${amountLabel} for ${label}`
+        : `You're flat for ${label}`;
+
+  return [
+    `${lead} across ${tradeCount} logged trade${tradeCount === 1 ? "" : "s"}.`,
+    breakdown.length ? `Breakdown: ${breakdown.join(", ")}.` : null
+  ]
+    .filter(Boolean)
+    .join(" ");
+}
+
+function buildDraftState(
+  conversationId: string,
+  createdAt: string,
+  draft: {
+    notes: string | null;
+    pnlAmount: number | null;
+    sourceMessage: string | null;
+    status: "pending_confirmation" | "collecting_details";
+    tickers: string[];
+    tradedOn: string;
+  }
+): TradeCaptureDraft {
+  return {
+    conversationId,
+    createdAt,
+    notes: draft.notes,
+    pnlAmount: draft.pnlAmount,
+    sourceMessage: draft.sourceMessage,
+    status: draft.status,
+    tickers: draft.tickers,
+    tradedOn: draft.tradedOn,
+    updatedAt: createdAt
+  };
+}
+
+function replayTradeCaptureDraftFromHistory(input: {
+  conversationId: string;
+  currentDate: string;
+  focusTickers: string[];
+  history: Array<{ content: string; createdAt: string; role: "assistant" | "user" }>;
+  userName: string;
+}) {
+  let reconstructedDraft: TradeCaptureDraft | null = null;
+
+  for (const entry of input.history.slice(-8)) {
+    if (entry.role !== "user") {
+      continue;
+    }
+
+    const replayTurn = resolveTradeCaptureTurn({
+      currentDate: input.currentDate,
+      existingDraft: reconstructedDraft,
+      focusTickers: input.focusTickers,
+      userMessage: entry.content,
+      userName: input.userName
+    });
+
+    if (replayTurn.mode !== "reply") {
+      continue;
+    }
+
+    if (replayTurn.nextDraft) {
+      reconstructedDraft = buildDraftState(
+        input.conversationId,
+        entry.createdAt,
+        replayTurn.nextDraft
+      );
+      continue;
+    }
+
+    if (replayTurn.calendarEntry) {
+      reconstructedDraft = null;
+    }
+  }
+
+  return reconstructedDraft;
 }
 
 export async function POST(request: Request) {
@@ -135,20 +458,81 @@ export async function POST(request: Request) {
   const updatedProfile = extractProfileUpdates(message, profileState.profile, history);
   const profileUpdateSummary = summarizeProfileUpdate(profileState.profile, updatedProfile);
   const profileUpdateApplied = Boolean(profileUpdateSummary);
-  const existingTradeDraft = await getTradeCaptureDraft(
-    supabase,
-    currentUser.id,
-    conversation.id
+  const currentTradeDate = getCurrentTradeDate();
+  const tradeCalendarEntries = await listTradeCalendarEntries(supabase, currentUser.id, {
+    limit: 120
+  });
+  const tradeCalendarBrief = buildTradeCalendarContextBrief(
+    tradeCalendarEntries,
+    currentTradeDate
   );
+  const existingTradeDraft = await getTradeCaptureDraft(supabase, currentUser.id, conversation.id);
   let tradeCalendarNotice: TradeCalendarNotice | null = null;
+  let confirmedTradeCalendarEntry: TradeCalendarEntry | null = null;
+  let reconstructedTradeDraft: TradeCaptureDraft | null = null;
   const focusTickers = normalizeTradeCalendarTickers(updatedProfile.focus_tickers);
-  const tradeCaptureTurn = resolveTradeCaptureTurn({
-    currentDate: getCurrentTradeDate(),
+  let tradeCaptureTurn = resolveTradeCaptureTurn({
+    currentDate: currentTradeDate,
     existingDraft: existingTradeDraft,
     focusTickers,
     userMessage: message,
     userName: nextDisplayName ?? "Trader"
   });
+
+  if (!existingTradeDraft) {
+    const lastAssistantMessage = history.at(-1);
+    const priorUserMessage = [...history].reverse().find((entry) => entry.role === "user") ?? null;
+
+    if (
+      lastAssistantMessage?.role === "assistant" &&
+      looksLikeTradeCalendarPrompt(lastAssistantMessage.content)
+    ) {
+      reconstructedTradeDraft = replayTradeCaptureDraftFromHistory({
+        conversationId: conversation.id,
+        currentDate: currentTradeDate,
+        focusTickers,
+        history,
+        userName: nextDisplayName ?? "Trader"
+      });
+
+      if (reconstructedTradeDraft) {
+        tradeCaptureTurn = resolveTradeCaptureTurn({
+          currentDate: currentTradeDate,
+          existingDraft: reconstructedTradeDraft,
+          focusTickers,
+          userMessage: message,
+          userName: nextDisplayName ?? "Trader"
+        });
+      } else if (priorUserMessage?.role === "user") {
+        const seededDraft = seedTradeCaptureDraftFromMessage({
+          currentDate: currentTradeDate,
+          focusTickers,
+          userMessage: priorUserMessage.content
+        });
+
+        if (seededDraft) {
+          reconstructedTradeDraft = buildDraftState(
+            conversation.id,
+            priorUserMessage.createdAt,
+            seededDraft
+          );
+          tradeCaptureTurn = resolveTradeCaptureTurn({
+            currentDate: currentTradeDate,
+            existingDraft: reconstructedTradeDraft,
+            focusTickers,
+            userMessage: message,
+            userName: nextDisplayName ?? "Trader"
+          });
+        }
+      }
+    }
+  }
+
+  const lastAssistantMessage = history.at(-1);
+  const isTradeCalendarFollowupWithoutStructuredTurn =
+    tradeCaptureTurn.mode === "pass" &&
+    lastAssistantMessage?.role === "assistant" &&
+    looksLikeTradeCalendarPrompt(lastAssistantMessage.content);
   let tradeCaptureReplyOverride: string | null =
     tradeCaptureTurn.mode === "reply" ? tradeCaptureTurn.reply : null;
 
@@ -202,14 +586,19 @@ export async function POST(request: Request) {
         ...tradeCaptureTurn.calendarEntry,
         conversationId: conversation.id
       });
+      const confirmedTradeEntry = savedTradeEntry
+        ? (await getTradeCalendarEntryById(supabase, currentUser.id, savedTradeEntry.id)) ??
+          savedTradeEntry
+        : null;
 
-      if (savedTradeEntry) {
-        tradeCalendarNotice = buildTradeCalendarNotice(savedTradeEntry);
+      if (confirmedTradeEntry) {
+        confirmedTradeCalendarEntry = confirmedTradeEntry;
+        tradeCalendarNotice = buildTradeCalendarNotice(confirmedTradeEntry);
+        tradeCaptureReplyOverride = buildTradeCalendarSavedReply(confirmedTradeEntry);
         await deleteTradeCaptureDraft(supabase, conversation.id);
       } else {
-        tradeCaptureReplyOverride = `${
-          nextDisplayName ?? "Trader"
-        }, I couldn't save that trade to the P&L calendar yet because the calendar storage isn't available in Supabase. I left the entry unsaved for now.`;
+        tradeCaptureReplyOverride =
+          "I couldn't save that trade to the P&L calendar yet, so I left it out of the calendar for now. If you want, send the trade again and I can retry it.";
       }
     } else if (tradeCaptureTurn.nextDraft) {
       await upsertTradeCaptureDraft(supabase, currentUser.id, conversation.id, tradeCaptureTurn.nextDraft);
@@ -327,6 +716,28 @@ export async function POST(request: Request) {
               reply:
                 "I can use a real first name or clean nickname, but I can't use abusive or hateful names. Tell me what you'd like me to call you instead."
             }
+          : isTradeCalendarSummaryQuery(message)
+            ? {
+                mode: "reply" as const,
+                reply: buildTradeCalendarSummaryReply(
+                  tradeCalendarEntries,
+                  message,
+                  currentTradeDate
+                )
+              }
+          : isTradeCalendarFollowupWithoutStructuredTurn
+          ? {
+              mode: "reply" as const,
+              reply: reconstructedTradeDraft
+                ? reconstructedTradeDraft.tickers.length && reconstructedTradeDraft.pnlAmount !== null
+                  ? 'I can keep logging this trade. I already have the ticker and realized P&L. Any notes you want included? If not, say "no notes" and I’ll log it as-is.'
+                  : reconstructedTradeDraft.tickers.length
+                    ? "I can keep logging this trade. I still need the realized P&L amount before I save it."
+                    : reconstructedTradeDraft.pnlAmount !== null
+                      ? "I can keep logging this trade. I still need the ticker before I save it."
+                      : "I can keep logging this trade. I still need the ticker and realized P&L before I save it."
+                : "I can keep logging this trade. I still need the ticker and realized P&L before I save it."
+              }
           : tradeCaptureTurn.mode === "reply"
             ? {
                 mode: "reply" as const,
@@ -342,6 +753,7 @@ export async function POST(request: Request) {
                 previousProfile: profileState.profile,
                 profileUpdateApplied,
                 profileUpdateSummary,
+                tradeCalendarBrief,
                 userMessage: message,
                 userName: nextDisplayName ?? "Trader"
               },
@@ -367,11 +779,31 @@ export async function POST(request: Request) {
           }
         }
 
+        const assistantQuickActions = (() => {
+          const tradeCalendarQuickActions = buildTradeCalendarQuickActions({
+            confirmedTradeCalendarEntry,
+            tradeCaptureTurn
+          });
+          if (tradeCalendarQuickActions.length) {
+            return tradeCalendarQuickActions;
+          }
+
+          return buildFocusTickerQuickActionsForTurn({
+            history,
+            nextProfile: updatedProfile,
+            previousProfile: profileState.profile,
+            profileUpdateApplied,
+            userMessage: message
+          });
+        })();
+
         const donePayload = await persistAssistantTurn(assistantMessage, extraNotifications);
         didPersistAssistant = true;
         send({
           assistantMessage,
           ...donePayload,
+          quickActions: assistantQuickActions,
+          tradeCalendarEntry: confirmedTradeCalendarEntry,
           tradeCalendarNotice,
           type: "done"
         });

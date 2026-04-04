@@ -72,6 +72,31 @@ type TradeCaptureDraftRow = {
   updated_at: string;
 };
 
+type TradeCalendarFallbackPayload = {
+  conversationId: string | null;
+  notes: string | null;
+  pnlAmount: number;
+  tickers: string[];
+  tradedOn: string;
+};
+
+type TradeCalendarFallbackRow = {
+  created_at: string;
+  detail: string | null;
+  id: string;
+};
+
+type ProfileTradeCalendarFallbackEntry = {
+  conversationId: string | null;
+  createdAt: string;
+  id: string;
+  notes: string | null;
+  pnlAmount: number;
+  tickers: string[];
+  tradedOn: string;
+  updatedAt: string;
+};
+
 export type DeskNotificationInput = {
   changeType: "added" | "updated" | "removed";
   detail: string | null;
@@ -118,10 +143,21 @@ function isMissingConversationTitleColumnError(message: string) {
 
 function isMissingNotificationsTableError(message: string) {
   return (
-    /memory_notifications/i.test(message) ||
-    /profile_notifications/i.test(message) ||
-    /relation .* does not exist/i.test(message) ||
-    /schema cache/i.test(message)
+    isMissingTableOrSchemaCacheError(message, "memory_notifications") ||
+    isMissingTableOrSchemaCacheError(message, "profile_notifications")
+  );
+}
+
+function isMissingTableOrSchemaCacheError(message: string, identifier: string) {
+  const escapedIdentifier = identifier.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  const identifierPattern = new RegExp(escapedIdentifier, "i");
+
+  return (
+    (/relation .* does not exist/i.test(message) && identifierPattern.test(message)) ||
+    (/schema cache/i.test(message) && identifierPattern.test(message)) ||
+    new RegExp(`could not find the table ['"]?(?:public\\.)?${escapedIdentifier}['"]?`, "i").test(
+      message
+    )
   );
 }
 
@@ -134,6 +170,53 @@ function isMissingMessageAttachmentDataColumnError(message: string) {
 
 function toTitleCase(value: string) {
   return value.replace(/\b[a-z]/g, (match) => match.toUpperCase());
+}
+
+function uniqueStrings(values: string[]) {
+  const seen = new Set<string>();
+  const unique: string[] = [];
+
+  for (const value of values) {
+    const normalized = value.trim();
+    if (!normalized || seen.has(normalized)) {
+      continue;
+    }
+
+    seen.add(normalized);
+    unique.push(normalized);
+  }
+
+  return unique;
+}
+
+const PROFILE_TRADE_CALENDAR_FALLBACK_KEY = "trade_calendar_fallback_entries";
+
+function profileCoreShape(profile: TradingProfile) {
+  return {
+    experience_level: profile.experience_level,
+    focus_tickers: profile.focus_tickers,
+    preferred_assets: profile.preferred_assets,
+    risk_tolerance: profile.risk_tolerance,
+    strategy_style: profile.strategy_style,
+    trading_rules: profile.trading_rules,
+    trading_goal: profile.trading_goal
+  };
+}
+
+function extractProfileJsonMetadata(value: unknown) {
+  if (!value || typeof value !== "object") {
+    return {};
+  }
+
+  const metadata = { ...(value as Record<string, unknown>) };
+  delete metadata.experience_level;
+  delete metadata.focus_tickers;
+  delete metadata.preferred_assets;
+  delete metadata.risk_tolerance;
+  delete metadata.strategy_style;
+  delete metadata.trading_rules;
+  delete metadata.trading_goal;
+  return metadata;
 }
 
 function humanizeEmailLocalPart(email: string | null | undefined) {
@@ -262,11 +345,16 @@ export async function updateStoredProfile(
   displayName: string | null,
   profile: TradingProfile
 ) {
+  const profileJson = await getProfileJsonRecord(supabase, userId);
+  const metadata = extractProfileJsonMetadata(profileJson);
   const result = await supabase
     .from("profiles")
     .update({
       display_name: displayName,
-      profile_json: profile
+      profile_json: {
+        ...profileCoreShape(profile),
+        ...metadata
+      }
     })
     .eq("user_id", userId);
 
@@ -323,6 +411,201 @@ function normalizeTradeCaptureDraft(row: TradeCaptureDraftRow): TradeCaptureDraf
   };
 }
 
+function serializeTradeCalendarFallbackPayload(entry: TradeCalendarEntryInput) {
+  return JSON.stringify({
+    conversationId: entry.conversationId,
+    notes: entry.notes,
+    pnlAmount: entry.pnlAmount,
+    tickers: uniqueStrings(entry.tickers.map((ticker) => ticker.toUpperCase())),
+    tradedOn: entry.tradedOn
+  } satisfies TradeCalendarFallbackPayload);
+}
+
+function parseTradeCalendarFallbackPayload(value: string | null) {
+  if (!value) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(value) as Partial<TradeCalendarFallbackPayload>;
+    if (
+      typeof parsed !== "object" ||
+      typeof parsed?.tradedOn !== "string" ||
+      !Array.isArray(parsed?.tickers) ||
+      typeof parsed?.pnlAmount !== "number"
+    ) {
+      return null;
+    }
+
+    return {
+      conversationId:
+        typeof parsed.conversationId === "string" ? parsed.conversationId : null,
+      notes: typeof parsed.notes === "string" ? parsed.notes : null,
+      pnlAmount: parsed.pnlAmount,
+      tickers: uniqueStrings(
+        parsed.tickers.map((ticker) => String(ticker).trim().toUpperCase()).filter(Boolean)
+      ),
+      tradedOn: parsed.tradedOn
+    } satisfies TradeCalendarFallbackPayload;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeTradeCalendarFallbackEntry(row: TradeCalendarFallbackRow) {
+  const payload = parseTradeCalendarFallbackPayload(row.detail);
+  if (!payload) {
+    return null;
+  }
+
+  return {
+    conversationId: payload.conversationId,
+    createdAt: row.created_at,
+    id: row.id,
+    notes: payload.notes,
+    pnlAmount: payload.pnlAmount,
+    tickers: payload.tickers,
+    tradedOn: payload.tradedOn,
+    updatedAt: row.created_at
+  } satisfies TradeCalendarEntry;
+}
+
+function normalizeProfileTradeCalendarFallbackEntry(value: unknown) {
+  if (!value || typeof value !== "object") {
+    return null;
+  }
+
+  const record = value as Record<string, unknown>;
+  const tradedOn =
+    typeof record.tradedOn === "string" && record.tradedOn.trim() ? record.tradedOn.trim() : null;
+  const id = typeof record.id === "string" && record.id.trim() ? record.id.trim() : null;
+  const createdAt =
+    typeof record.createdAt === "string" && record.createdAt.trim()
+      ? record.createdAt.trim()
+      : null;
+  const updatedAt =
+    typeof record.updatedAt === "string" && record.updatedAt.trim()
+      ? record.updatedAt.trim()
+      : createdAt;
+  const pnlAmount =
+    typeof record.pnlAmount === "number"
+      ? record.pnlAmount
+      : typeof record.pnlAmount === "string"
+        ? Number(record.pnlAmount)
+        : NaN;
+
+  if (!tradedOn || !id || !createdAt || !updatedAt || !Number.isFinite(pnlAmount)) {
+    return null;
+  }
+
+  const tickers = Array.isArray(record.tickers)
+    ? uniqueStrings(record.tickers.map((ticker) => String(ticker).trim().toUpperCase()).filter(Boolean))
+    : [];
+
+  return {
+    conversationId:
+      typeof record.conversationId === "string" && record.conversationId.trim()
+        ? record.conversationId.trim()
+        : null,
+    createdAt,
+    id,
+    notes: typeof record.notes === "string" ? record.notes : null,
+    pnlAmount,
+    tickers,
+    tradedOn,
+    updatedAt
+  } satisfies ProfileTradeCalendarFallbackEntry;
+}
+
+function parseProfileTradeCalendarFallbackEntries(value: unknown) {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value
+    .map(normalizeProfileTradeCalendarFallbackEntry)
+    .filter((entry): entry is ProfileTradeCalendarFallbackEntry => Boolean(entry));
+}
+
+async function getProfileJsonRecord(supabase: SupabaseClient, userId: string) {
+  const { data, error } = await supabase
+    .from("profiles")
+    .select("profile_json")
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return (data?.profile_json as Record<string, unknown> | null | undefined) ?? null;
+}
+
+async function listProfileTradeCalendarFallbackEntries(
+  supabase: SupabaseClient,
+  userId: string
+): Promise<TradeCalendarEntry[]> {
+  const profileJson = await getProfileJsonRecord(supabase, userId);
+  if (!profileJson) {
+    return [];
+  }
+
+  return parseProfileTradeCalendarFallbackEntries(
+    profileJson[PROFILE_TRADE_CALENDAR_FALLBACK_KEY]
+  ).sort((left, right) => {
+    const tradedOnCompare = right.tradedOn.localeCompare(left.tradedOn);
+    if (tradedOnCompare !== 0) {
+      return tradedOnCompare;
+    }
+
+    return right.createdAt.localeCompare(left.createdAt);
+  });
+}
+
+async function appendProfileTradeCalendarFallbackEntry(
+  supabase: SupabaseClient,
+  userId: string,
+  entry: TradeCalendarEntryInput
+): Promise<TradeCalendarEntry | null> {
+  const profileJson = await getProfileJsonRecord(supabase, userId);
+  if (!profileJson) {
+    return null;
+  }
+
+  const now = new Date().toISOString();
+  const fallbackEntry: ProfileTradeCalendarFallbackEntry = {
+    conversationId: entry.conversationId,
+    createdAt: now,
+    id: crypto.randomUUID(),
+    notes: entry.notes,
+    pnlAmount: entry.pnlAmount,
+    tickers: uniqueStrings(entry.tickers.map((ticker) => ticker.toUpperCase())),
+    tradedOn: entry.tradedOn,
+    updatedAt: now
+  };
+
+  const existingEntries = parseProfileTradeCalendarFallbackEntries(
+    profileJson[PROFILE_TRADE_CALENDAR_FALLBACK_KEY]
+  );
+  const metadata = extractProfileJsonMetadata(profileJson);
+  const nextProfileJson = {
+    ...profileCoreShape(normalizeTradingProfile(profileJson)),
+    ...metadata,
+    [PROFILE_TRADE_CALENDAR_FALLBACK_KEY]: [...existingEntries, fallbackEntry]
+  };
+
+  const { error } = await supabase
+    .from("profiles")
+    .update({ profile_json: nextProfileJson })
+    .eq("user_id", userId);
+
+  if (error) {
+    throw new Error(error.message);
+  }
+
+  return fallbackEntry;
+}
+
 export async function listWorkspaceNotifications(
   supabase: SupabaseClient,
   userId: string,
@@ -332,6 +615,7 @@ export async function listWorkspaceNotifications(
     .from("profile_notifications")
     .select("id, field_key, change_type, title, detail, created_at")
     .eq("user_id", userId)
+    .neq("field_key", "trade_calendar_fallback")
     .order("created_at", { ascending: false })
     .limit(limit);
 
@@ -425,12 +709,48 @@ export async function listTradeCalendarEntries(
   const { data, error } = await query;
 
   if (error) {
-    if (
-      /trade_calendar_entries/i.test(error.message) ||
-      /relation .* does not exist/i.test(error.message) ||
-      /schema cache/i.test(error.message)
-    ) {
-      return [];
+    if (isMissingTableOrSchemaCacheError(error.message, "trade_calendar_entries")) {
+      let fallbackQuery = supabase
+        .from("profile_notifications")
+        .select("id, detail, created_at")
+        .eq("user_id", userId)
+        .eq("field_key", "trade_calendar_fallback")
+        .order("created_at", { ascending: false });
+
+      if (options?.limit) {
+        fallbackQuery = fallbackQuery.limit(options.limit);
+      }
+
+      const { data: fallbackData, error: fallbackError } = await fallbackQuery;
+      if (fallbackError) {
+        if (!isMissingNotificationsTableError(fallbackError.message)) {
+          throw new Error(fallbackError.message);
+        }
+      }
+
+      const notificationFallbackEntries = ((fallbackData ?? []) as TradeCalendarFallbackRow[])
+        .map(normalizeTradeCalendarFallbackEntry)
+        .filter((entry): entry is TradeCalendarEntry => Boolean(entry));
+      const profileFallbackEntries = await listProfileTradeCalendarFallbackEntries(
+        supabase,
+        userId
+      );
+      const fallbackEntries = [...notificationFallbackEntries, ...profileFallbackEntries].sort(
+        (left, right) => {
+          const tradedOnCompare = right.tradedOn.localeCompare(left.tradedOn);
+          if (tradedOnCompare !== 0) {
+            return tradedOnCompare;
+          }
+
+          return right.createdAt.localeCompare(left.createdAt);
+        }
+      );
+
+      if (options?.monthStart) {
+        return fallbackEntries.filter((entry) => entry.tradedOn >= options.monthStart!);
+      }
+
+      return fallbackEntries;
     }
 
     throw new Error(error.message);
@@ -454,11 +774,7 @@ export async function getTradeCaptureDraft(
     .maybeSingle();
 
   if (error) {
-    if (
-      /trade_capture_drafts/i.test(error.message) ||
-      /relation .* does not exist/i.test(error.message) ||
-      /schema cache/i.test(error.message)
-    ) {
+    if (isMissingTableOrSchemaCacheError(error.message, "trade_capture_drafts")) {
       return null;
     }
 
@@ -491,11 +807,7 @@ export async function upsertTradeCaptureDraft(
   );
 
   if (error) {
-    if (
-      /trade_capture_drafts/i.test(error.message) ||
-      /relation .* does not exist/i.test(error.message) ||
-      /schema cache/i.test(error.message)
-    ) {
+    if (isMissingTableOrSchemaCacheError(error.message, "trade_capture_drafts")) {
       return;
     }
 
@@ -513,11 +825,7 @@ export async function deleteTradeCaptureDraft(
     .eq("conversation_id", conversationId);
 
   if (error) {
-    if (
-      /trade_capture_drafts/i.test(error.message) ||
-      /relation .* does not exist/i.test(error.message) ||
-      /schema cache/i.test(error.message)
-    ) {
+    if (isMissingTableOrSchemaCacheError(error.message, "trade_capture_drafts")) {
       return;
     }
 
@@ -544,18 +852,92 @@ export async function createTradeCalendarEntry(
     .single();
 
   if (error) {
-    if (
-      /trade_calendar_entries/i.test(error.message) ||
-      /relation .* does not exist/i.test(error.message) ||
-      /schema cache/i.test(error.message)
-    ) {
-      return null;
+    if (isMissingTableOrSchemaCacheError(error.message, "trade_calendar_entries")) {
+      const { data: fallbackData, error: fallbackError } = await supabase
+        .from("profile_notifications")
+        .insert({
+          user_id: userId,
+          field_key: "trade_calendar_fallback",
+          change_type: "added",
+          title: "Trade calendar entry",
+          detail: serializeTradeCalendarFallbackPayload(entry)
+        })
+        .select("id, detail, created_at")
+        .single();
+
+      if (fallbackError) {
+        if (!isMissingNotificationsTableError(fallbackError.message)) {
+          throw new Error(fallbackError.message);
+        }
+
+        return appendProfileTradeCalendarFallbackEntry(supabase, userId, entry);
+      }
+
+      return (
+        normalizeTradeCalendarFallbackEntry(fallbackData as TradeCalendarFallbackRow) ??
+        (await appendProfileTradeCalendarFallbackEntry(supabase, userId, entry))
+      );
     }
 
     throw new Error(error.message);
   }
 
   return normalizeTradeCalendarEntry(data as TradeCalendarEntryRow);
+}
+
+export async function getTradeCalendarEntryById(
+  supabase: SupabaseClient,
+  userId: string,
+  entryId: string
+): Promise<TradeCalendarEntry | null> {
+  const { data, error } = await supabase
+    .from("trade_calendar_entries")
+    .select("id, conversation_id, traded_on, tickers, pnl_amount, notes, created_at, updated_at")
+    .eq("user_id", userId)
+    .eq("id", entryId)
+    .maybeSingle();
+
+  if (error) {
+    if (isMissingTableOrSchemaCacheError(error.message, "trade_calendar_entries")) {
+      const { data: fallbackData, error: fallbackError } = await supabase
+        .from("profile_notifications")
+        .select("id, detail, created_at")
+        .eq("user_id", userId)
+        .eq("field_key", "trade_calendar_fallback")
+        .eq("id", entryId)
+        .maybeSingle();
+
+      if (fallbackError) {
+        if (!isMissingNotificationsTableError(fallbackError.message)) {
+          throw new Error(fallbackError.message);
+        }
+
+        const profileFallbackEntries = await listProfileTradeCalendarFallbackEntries(
+          supabase,
+          userId
+        );
+        return profileFallbackEntries.find((entry) => entry.id === entryId) ?? null;
+      }
+
+      const notificationFallbackEntry = fallbackData
+        ? normalizeTradeCalendarFallbackEntry(fallbackData as TradeCalendarFallbackRow)
+        : null;
+
+      if (notificationFallbackEntry) {
+        return notificationFallbackEntry;
+      }
+
+      const profileFallbackEntries = await listProfileTradeCalendarFallbackEntries(
+        supabase,
+        userId
+      );
+      return profileFallbackEntries.find((entry) => entry.id === entryId) ?? null;
+    }
+
+    throw new Error(error.message);
+  }
+
+  return data ? normalizeTradeCalendarEntry(data as TradeCalendarEntryRow) : null;
 }
 
 function normalizeConversationSummaryTitle(title: string | null, firstUserMessage: string | null) {

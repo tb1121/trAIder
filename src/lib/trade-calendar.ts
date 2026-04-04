@@ -60,6 +60,7 @@ export type TradeCaptureTurnResult =
       reply: string;
     };
 
+const CALENDAR_KEYWORD_HINT = /\b(?:calendar|calend[a-z]*|p(?:&|and)?l|pl)\b/i;
 const TRADE_DAY_HINT =
   /\b(today|this morning|this afternoon|this evening|just now|just took|just booked|just closed|for today|this session|on the open|at the open|at the close|this trade)\b/i;
 const TRADE_ACTION_HINT =
@@ -67,11 +68,11 @@ const TRADE_ACTION_HINT =
 const TRADE_RESULT_HINT =
   /\b(won|made|booked|banked|gained|gain|green|profit|profited|lost|down|red|loss|gave back|p&l|pnl)\b/i;
 const EXPLICIT_CALENDAR_INTENT =
-  /\b(add|log|track|put|save|record)\b[\s\S]{0,36}\b(?:p(?:&|and)?l|pl)\b[\s\S]{0,18}\b(?:calendar|log|entry)\b/i;
+  /\b(?:add|log|track|put|save|record)\b[\s\S]{0,36}\b(?:(?:p(?:&|and)?l|pl)(?:[\s\S]{0,18}\b(?:calendar|calend[a-z]*|log|entry))?|calend[a-z]*)\b/i;
 const AFFIRMATIVE_REPLY =
   /\b(yes|yeah|yep|yup|sure|please do|do it|go ahead|sounds good|log it|add it|save it|record it|that works|ok|okay)\b/i;
 const NEGATIVE_REPLY =
-  /\b(no|nah|not now|skip it|skip that|leave it|don'?t|do not|no thanks|nope)\b/i;
+  /\b(nah|not now|skip it|skip that|leave it|don'?t|do not|no thanks|nope)\b/i;
 const NOTES_SKIP_REPLY = /\b(no notes?|skip notes?|leave notes? blank|none)\b/i;
 const TICKER_STOP_WORDS = new Set([
   "A",
@@ -168,6 +169,24 @@ function normalizeWhitespace(value: string) {
   return value.replace(/\s+/g, " ").trim();
 }
 
+function isTradeCalendarCancellationReply(message: string) {
+  const normalized = normalizeWhitespace(message).toLowerCase();
+
+  if (!normalized) {
+    return false;
+  }
+
+  if (NOTES_SKIP_REPLY.test(normalized)) {
+    return false;
+  }
+
+  if (AFFIRMATIVE_REPLY.test(normalized) || EXPLICIT_CALENDAR_INTENT.test(normalized)) {
+    return false;
+  }
+
+  return normalized === "no" || NEGATIVE_REPLY.test(normalized);
+}
+
 function uniqueStrings(values: string[]) {
   const seen = new Set<string>();
   const unique: string[] = [];
@@ -191,6 +210,32 @@ function parseNumberToken(value: string) {
   return Number.isFinite(parsed) ? parsed : null;
 }
 
+function parseBarePnlReply(
+  message: string,
+  existingDraft: TradeCaptureDraft | null
+) {
+  if (!existingDraft || existingDraft.pnlAmount !== null) {
+    return null;
+  }
+
+  const normalized = normalizeWhitespace(message);
+  if (!normalized) {
+    return null;
+  }
+
+  const bareMatch = normalized.match(/^[+-]?\$?\s*(\d[\d,]*(?:\.\d+)?)$/);
+  if (!bareMatch) {
+    return null;
+  }
+
+  const parsed = parseNumberToken(bareMatch[1]);
+  if (parsed === null) {
+    return null;
+  }
+
+  return normalized.trim().startsWith("-") ? -Math.abs(parsed) : Math.abs(parsed);
+}
+
 function extractPnlAmount(message: string) {
   const signedMatch = message.match(/([+-])\s*\$?\s*(\d[\d,]*(?:\.\d+)?)/i);
   if (signedMatch) {
@@ -202,7 +247,8 @@ function extractPnlAmount(message: string) {
 
   const positivePatterns = [
     /\b(?:won|made|booked|banked|gained|up|green|profit(?:ed)?)\s+\$?\s*(\d[\d,]*(?:\.\d+)?)/i,
-    /\$?\s*(\d[\d,]*(?:\.\d+)?)\s+\b(?:profit|gain)\b/i
+    /\$?\s*(\d[\d,]*(?:\.\d+)?)\s+\b(?:profit|gain)\b/i,
+    /\b(\d[\d,]*(?:\.\d+)?)\s+(?:dollars?|bucks?)\s+\b(?:profit|gain)\b/i
   ];
   for (const pattern of positivePatterns) {
     const match = message.match(pattern);
@@ -214,7 +260,8 @@ function extractPnlAmount(message: string) {
 
   const negativePatterns = [
     /\b(?:lost|down|red|loss|gave back)\s+\$?\s*(\d[\d,]*(?:\.\d+)?)/i,
-    /\$?\s*(\d[\d,]*(?:\.\d+)?)\s+\b(?:loss)\b/i
+    /\$?\s*(\d[\d,]*(?:\.\d+)?)\s+\b(?:loss)\b/i,
+    /\b(\d[\d,]*(?:\.\d+)?)\s+(?:dollars?|bucks?)\s+\b(?:loss)\b/i
   ];
   for (const pattern of negativePatterns) {
     const match = message.match(pattern);
@@ -239,6 +286,10 @@ function normalizeTickerToken(token: string, knownSymbols: Set<string>) {
   const isKnown = knownSymbols.has(upper);
 
   if (upper.length < 1 || upper.length > 6) {
+    return null;
+  }
+
+  if (upper.length === 1 && !looksExplicit && !isKnown) {
     return null;
   }
 
@@ -354,7 +405,7 @@ function mergeTradeDraft(
   } satisfies TradeCaptureDraftInput;
 }
 
-function getMissingTradeFields(draft: TradeCaptureDraftInput) {
+function getMissingRequiredTradeFields(draft: TradeCaptureDraftInput) {
   const missing: string[] = [];
   if (!draft.tickers.length) {
     missing.push("ticker");
@@ -362,14 +413,11 @@ function getMissingTradeFields(draft: TradeCaptureDraftInput) {
   if (draft.pnlAmount === null) {
     missing.push("P&L amount");
   }
-  if (!draft.notes) {
-    missing.push("notes");
-  }
   return missing;
 }
 
-function isTradeDraftComplete(draft: TradeCaptureDraftInput) {
-  return getMissingTradeFields(draft).length === 0;
+function hasRequiredTradeFields(draft: TradeCaptureDraftInput) {
+  return getMissingRequiredTradeFields(draft).length === 0;
 }
 
 function formatTradeDate(value: string) {
@@ -423,20 +471,24 @@ function buildTradeCalendarInviteReply(userName: string, snapshot: TradeSnapshot
     ? `I picked up ${snapshot.tickers.join(", ")} from what you said.`
     : "I can pull the ticker from that trade once you confirm it.";
 
-  return `That sounds like a trade from today. Do you want me to add it to your P&L calendar? ${tickerCopy}`;
+  return `That sounds like a trade from today. Do you want me to add it to your P&L calendar? ${tickerCopy} If you do, I’ll make sure I have the ticker, realized P&L, and any notes you want included.`;
 }
 
 function buildTradeCalendarMissingReply(userName: string, draft: TradeCaptureDraftInput) {
-  const missing = getMissingTradeFields(draft);
+  const missing = getMissingRequiredTradeFields(draft);
   const formattedMissing =
     missing.length === 1
       ? missing[0]
       : `${missing.slice(0, -1).join(", ")}, and ${missing.at(-1)}`;
 
-  return `I can log that to your P&L calendar. I still need the ${formattedMissing} for the entry.`;
+  return `I can log that to your P&L calendar. I still need the ${formattedMissing} before I save the entry.`;
 }
 
-function buildTradeCalendarSavedReply(userName: string, entry: TradeCalendarEntryInput) {
+function buildTradeCalendarNotesReply() {
+  return 'I can log that to your P&L calendar. I already have the ticker and realized P&L. Any notes you want included? If not, say "no notes" and I’ll log it as-is.';
+}
+
+export function buildTradeCalendarSavedReply(entry: TradeCalendarEntryInput) {
   const amountLabel = formatTradePnlAmount(entry.pnlAmount);
   const tickersLabel = entry.tickers.join(", ");
 
@@ -452,10 +504,6 @@ function buildCancelledReply(userName: string) {
 }
 
 function shouldTreatAsTradeMention(message: string, snapshot: TradeSnapshot) {
-  if (!snapshot.tickers.length && snapshot.pnlAmount === null) {
-    return false;
-  }
-
   return snapshot.mentionsTradeToday;
 }
 
@@ -476,6 +524,28 @@ export function serializeTradeCalendarTickers(tickers: string[]) {
   return uniqueStrings(tickers.map((ticker) => ticker.toUpperCase())).join(", ");
 }
 
+export function seedTradeCaptureDraftFromMessage(input: {
+  currentDate: string;
+  focusTickers: string[];
+  userMessage: string;
+}): TradeCaptureDraftInput | null {
+  const normalizedMessage = normalizeWhitespace(input.userMessage);
+  const snapshot = extractTradeSnapshot(normalizedMessage, input.focusTickers, []);
+
+  if (!snapshot.tickers.length && snapshot.pnlAmount === null && snapshot.notes === null) {
+    return null;
+  }
+
+  return {
+    notes: snapshot.notes,
+    pnlAmount: snapshot.pnlAmount,
+    sourceMessage: normalizedMessage,
+    status: "collecting_details",
+    tickers: snapshot.tickers,
+    tradedOn: input.currentDate
+  };
+}
+
 export function resolveTradeCaptureTurn(input: {
   currentDate: string;
   existingDraft: TradeCaptureDraft | null;
@@ -490,9 +560,10 @@ export function resolveTradeCaptureTurn(input: {
     input.focusTickers,
     input.existingDraft?.tickers ?? []
   );
+  const inferredBarePnlAmount = parseBarePnlReply(normalizedMessage, input.existingDraft);
 
   if (input.existingDraft) {
-    if (NEGATIVE_REPLY.test(normalizedMessage)) {
+    if (isTradeCalendarCancellationReply(normalizedMessage)) {
       return {
         calendarEntry: null,
         mode: "reply",
@@ -510,31 +581,55 @@ export function resolveTradeCaptureTurn(input: {
       tradedOn: input.existingDraft.tradedOn
     };
     const mergedDraft = mergeTradeDraft(draftBase, snapshot, normalizedMessage);
+    const effectiveDraft =
+      inferredBarePnlAmount !== null
+        ? {
+            ...mergedDraft,
+            pnlAmount: inferredBarePnlAmount
+          }
+        : mergedDraft;
     const isAffirmative =
       AFFIRMATIVE_REPLY.test(normalizedMessage) ||
       explicitCalendarIntent ||
       snapshot.tickers.length > 0 ||
       snapshot.pnlAmount !== null ||
-      snapshot.notes !== null;
+      snapshot.notes !== null ||
+      NOTES_SKIP_REPLY.test(normalizedMessage) ||
+      inferredBarePnlAmount !== null;
 
     if (!isAffirmative) {
       return { mode: "pass" };
     }
 
-    if (isTradeDraftComplete(mergedDraft)) {
+    if (!hasRequiredTradeFields(effectiveDraft)) {
+      return {
+        calendarEntry: null,
+        mode: "reply",
+        nextDraft: {
+          ...effectiveDraft,
+          status: "collecting_details"
+        },
+        reply: buildTradeCalendarMissingReply(input.userName, {
+          ...effectiveDraft,
+          status: "collecting_details"
+        })
+      };
+    }
+
+    if (effectiveDraft.notes !== null || NOTES_SKIP_REPLY.test(normalizedMessage)) {
       const calendarEntry: TradeCalendarEntryInput = {
         conversationId: input.existingDraft.conversationId,
-        notes: mergedDraft.notes,
-        pnlAmount: mergedDraft.pnlAmount ?? 0,
-        tickers: mergedDraft.tickers,
-        tradedOn: mergedDraft.tradedOn
+        notes: NOTES_SKIP_REPLY.test(normalizedMessage) ? null : effectiveDraft.notes,
+        pnlAmount: effectiveDraft.pnlAmount ?? 0,
+        tickers: effectiveDraft.tickers,
+        tradedOn: effectiveDraft.tradedOn
       };
 
       return {
         calendarEntry,
         mode: "reply",
         nextDraft: null,
-        reply: buildTradeCalendarSavedReply(input.userName, calendarEntry)
+        reply: buildTradeCalendarSavedReply(calendarEntry)
       };
     }
 
@@ -542,13 +637,10 @@ export function resolveTradeCaptureTurn(input: {
       calendarEntry: null,
       mode: "reply",
       nextDraft: {
-        ...mergedDraft,
+        ...effectiveDraft,
         status: "collecting_details"
       },
-      reply: buildTradeCalendarMissingReply(input.userName, {
-        ...mergedDraft,
-        status: "collecting_details"
-      })
+      reply: buildTradeCalendarNotesReply()
     };
   }
 
@@ -562,10 +654,19 @@ export function resolveTradeCaptureTurn(input: {
       tradedOn: input.currentDate
     };
 
-    if (isTradeDraftComplete(draft)) {
+    if (!hasRequiredTradeFields(draft)) {
+      return {
+        calendarEntry: null,
+        mode: "reply",
+        nextDraft: draft,
+        reply: buildTradeCalendarMissingReply(input.userName, draft)
+      };
+    }
+
+    if (draft.notes !== null || NOTES_SKIP_REPLY.test(normalizedMessage)) {
       const calendarEntry: TradeCalendarEntryInput = {
         conversationId: null,
-        notes: draft.notes,
+        notes: NOTES_SKIP_REPLY.test(normalizedMessage) ? null : draft.notes,
         pnlAmount: draft.pnlAmount ?? 0,
         tickers: draft.tickers,
         tradedOn: draft.tradedOn
@@ -575,15 +676,18 @@ export function resolveTradeCaptureTurn(input: {
         calendarEntry,
         mode: "reply",
         nextDraft: null,
-        reply: buildTradeCalendarSavedReply(input.userName, calendarEntry)
+        reply: buildTradeCalendarSavedReply(calendarEntry)
       };
     }
 
     return {
       calendarEntry: null,
       mode: "reply",
-      nextDraft: draft,
-      reply: buildTradeCalendarMissingReply(input.userName, draft)
+      nextDraft: {
+        ...draft,
+        status: "collecting_details"
+      },
+      reply: buildTradeCalendarNotesReply()
     };
   }
 

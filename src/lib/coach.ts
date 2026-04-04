@@ -6,6 +6,7 @@ export type TradingProfile = {
   focus_tickers: string | null;
   preferred_assets: string | null;
   strategy_style: string | null;
+  trading_rules: string | null;
   risk_tolerance: string | null;
   trading_goal: string | null;
 };
@@ -17,6 +18,13 @@ export type WorkspaceMessage = {
   createdAt: string;
   role: "user" | "assistant";
   content: string;
+  quickActions?: WorkspaceQuickAction[] | null;
+};
+
+export type WorkspaceQuickAction = {
+  kind: "prefill" | "submit";
+  label: string;
+  prompt: string;
 };
 
 export type ProfileChangeNotification = {
@@ -35,6 +43,7 @@ type CoachReplyInput = {
   previousProfile: TradingProfile;
   profileUpdateApplied: boolean;
   profileUpdateSummary: string | null;
+  tradeCalendarBrief?: string | null;
   userMessage: string;
   userName: string;
   webSearchBrief?: string | null;
@@ -78,6 +87,8 @@ Your job:
 - Only treat something as a ticker when it is clearly being used as a market symbol in context. Do not infer tickers from initials, dotted abbreviations, or unrelated references.
 - If the user asks for a web lookup and no web search results were provided to you, do not claim you fundamentally cannot browse. Instead, say the web search connector is not configured for this turn and continue helping with the trading context you do have.
 - trAIder can update saved profile memory server-side. Never claim you cannot update saved profile data.
+- Never claim a trade was logged to the P&L calendar unless this turn explicitly tells you the server already verified that save. If you do not have that confirmation, ask for the ticker and realized P&L again or say you need to retry the log.
+- When verified P&L calendar context is provided for this turn, use it directly for questions about today's, weekly, monthly, or yearly realized performance.
 - Never claim you saved, removed, or updated profile memory unless that change is reflected in the saved profile JSON provided to you for this turn.
 - Never state that a ticker is delisted, inactive, acquired, renamed, unsupported, or no longer trading unless that fact is verified by supplied web context in this turn or explicitly provided by the user.
 - Never infer symbol inactivity from a missing quote, unfamiliar ticker, or stale memory.
@@ -155,7 +166,9 @@ const PROFILE_QUESTIONS = {
   strategy_style:
     "What kind of trading style or strategy fits you best right now: scalping, day trading, swing trading, momentum, mean reversion, trend following, volatility, or market making?",
   risk_tolerance: "How would you describe your risk comfort today: conservative, balanced, or aggressive?",
-  trading_goal: "What would make trAIder most useful for you over the next month: consistency, education, discipline, or performance review?"
+  trading_goal: "What would make trAIder most useful for you over the next month: consistency, education, discipline, or performance review?",
+  trading_rules:
+    "What are the non-negotiable trading rules you want this desk to remember, like max risk, stop discipline, or no revenge trades?"
 };
 
 const GUIDED_PROFILE_KEYS = [
@@ -163,7 +176,8 @@ const GUIDED_PROFILE_KEYS = [
   "preferred_assets",
   "strategy_style",
   "risk_tolerance",
-  "trading_goal"
+  "trading_goal",
+  "trading_rules"
 ] as const;
 
 const PROFILE_FIELD_LABELS: Record<keyof TradingProfile, string> = {
@@ -171,6 +185,7 @@ const PROFILE_FIELD_LABELS: Record<keyof TradingProfile, string> = {
   focus_tickers: "focus tickers",
   preferred_assets: "preferred assets",
   strategy_style: "strategies",
+  trading_rules: "rules",
   risk_tolerance: "risk tolerance",
   trading_goal: "trading goal"
 };
@@ -180,6 +195,8 @@ const PROFILE_REFERENCE_PATTERNS: Record<keyof TradingProfile, RegExp> = {
   focus_tickers: /\b(focus\s+tickers?|focus\s+tickes|tickers?|tickes|symbols?|watchlists?)\b/i,
   preferred_assets: /\b(preferred\s+assets?|assets?|markets?)\b/i,
   strategy_style: /\b(strategy\s+style|strateg(?:y|ies)|trading\s+style|style|approach)\b/i,
+  trading_rules:
+    /\b(trading\s+rules?|rules?|rulebook|non[\s-]*negotiables?|guardrails?)\b/i,
   risk_tolerance: /\b(risk(?:\s+tolerance|\s+profile)?)\b/i,
   trading_goal: /\b(trading\s+goal|goal)\b/i
 };
@@ -191,11 +208,15 @@ const PROFILE_CLEAR_PATTERNS: Partial<Record<keyof TradingProfile, RegExp>> = {
     /\b(remove|clear|delete|drop|forget|reset)\b[\s\S]{0,24}\b(?:my\s+)?(?:preferred\s+assets?|assets?|markets?)\b/i,
   strategy_style:
     /\b(remove|clear|delete|drop|forget|reset)\b[\s\S]{0,24}\b(?:my\s+)?(?:strategy\s+style|strateg(?:y|ies)|trading\s+style|style|approach)\b/i,
+  trading_rules:
+    /\b(remove|clear|delete|drop|forget|reset)\b[\s\S]{0,24}\b(?:my\s+)?(?:trading\s+rules?|rules?|rulebook|non[\s-]*negotiables?|guardrails?)\b/i,
   risk_tolerance:
     /\b(remove|clear|delete|drop|forget|reset)\b[\s\S]{0,24}\b(?:my\s+)?(?:risk(?:\s+tolerance|\s+profile)?)\b/i,
   trading_goal:
     /\b(remove|clear|delete|drop|forget|reset)\b[\s\S]{0,24}\b(?:my\s+)?(?:trading\s+goal|goal)\b/i
 };
+
+const DISALLOWED_PSEUDO_TICKERS = new Set(["PL", "PNL"]);
 
 const TICKER_STOP_WORDS = new Set([
   "A",
@@ -254,6 +275,9 @@ const TICKER_STOP_WORDS = new Set([
   "OR",
   "OUR",
   "OUT",
+  "P",
+  "PL",
+  "PNL",
   "PLEASE",
   "REMOVE",
   "RESET",
@@ -316,11 +340,14 @@ const KNOWN_MARKET_SYMBOLS = new Set([
 
 const TICKER_REMOVE_INTENT =
   /\b(remove|delete|drop|forget|exclude|untrack|take off|stop tracking|no longer track|don't track|do not track)\b/i;
-const TICKER_ADD_INTENT = /\b(add|track|watch|follow|include|keep|save|remember)\b/i;
-const TICKER_DIRECT_MEMORY_VERB = /\b(track|watch|follow|untrack|stop tracking)\b/i;
+const TICKER_ADD_INTENT = /\b(add|track|watch|follow|include|keep|save|remember|put|pin)\b/i;
+const TICKER_DIRECT_MEMORY_VERB =
+  /\b(track|watch|follow|untrack|stop tracking|put|pin)\b/i;
 const TICKER_CLEAR_ALL_INTENT =
   /\b(clear|reset|remove all|drop all|forget all)\b.*\b(tickers|symbols|watchlist|ticker|symbol)\b/i;
 const SINGULAR_TICKER_REFERENCE = /\b(it|that|this|the one|that one)\b/i;
+const PNL_CALENDAR_INTENT_HINT =
+  /\b(?:p(?:&|and)?l|pl|calend[a-z]*)\b/i;
 const TICKER_PREFERENCE_HINT =
   /\b(like|love|prefer|favorite|favourite|interested in|focused on|focus on|bullish on|into)\b/i;
 const TRADING_CONTEXT_HINT =
@@ -332,7 +359,7 @@ const THREAD_REFERENCE_HINT =
 const WEB_SEARCH_REQUEST_HINT =
   /\b(check the web|search the web|look it up|look up|check the news|search for|latest news|latest update|current news|web)\b/i;
 const PROFILE_SURFACE_HINT =
-  /\b(profile|memory|remember|saved|watchlist|focus tickers|what do you know about me|about me|my style|my strategy|my risk|my goal)\b/i;
+  /\b(profile|memory|remember|saved|watchlist|focus tickers|what do you know about me|about me|my style|my strategy|my risk|my goal|my rules|rulebook|non[\s-]*negotiables?)\b/i;
 const PROFILE_SET_INTENT = /\b(set|save|remember|update|change|adjust|make|keep)\b/i;
 const PROFILE_REMOVE_INTENT = /\b(remove|clear|delete|drop|forget|reset)\b/i;
 
@@ -341,6 +368,7 @@ export const emptyTradingProfile: TradingProfile = {
   focus_tickers: null,
   preferred_assets: null,
   strategy_style: null,
+  trading_rules: null,
   risk_tolerance: null,
   trading_goal: null
 };
@@ -354,10 +382,15 @@ export function normalizeTradingProfile(value: unknown): TradingProfile {
   return {
     experience_level:
       typeof profile.experience_level === "string" ? profile.experience_level : null,
-    focus_tickers: typeof profile.focus_tickers === "string" ? profile.focus_tickers : null,
+    focus_tickers:
+      typeof profile.focus_tickers === "string"
+        ? sanitizeFocusTickersValue(profile.focus_tickers)
+        : null,
     preferred_assets:
       typeof profile.preferred_assets === "string" ? profile.preferred_assets : null,
     strategy_style: typeof profile.strategy_style === "string" ? profile.strategy_style : null,
+    trading_rules:
+      typeof profile.trading_rules === "string" ? serializeRuleSegments(parseRuleSegments(profile.trading_rules)) : null,
     risk_tolerance:
       typeof profile.risk_tolerance === "string" ? profile.risk_tolerance : null,
     trading_goal: typeof profile.trading_goal === "string" ? profile.trading_goal : null
@@ -378,6 +411,13 @@ export function summarizeProfile(profile: TradingProfile) {
   }
   if (profile.strategy_style) {
     segments.push(profile.strategy_style);
+  }
+  if (profile.trading_rules) {
+    const [firstRule, secondRule] = parseRuleSegments(profile.trading_rules);
+    const summarizedRules = [firstRule, secondRule].filter(Boolean).join(" / ");
+    if (summarizedRules) {
+      segments.push(`rules: ${summarizedRules}`);
+    }
   }
   if (profile.preferred_assets) {
     segments.push(`focused on ${profile.preferred_assets}`);
@@ -418,6 +458,29 @@ function normalizeWhitespace(value: string) {
 
 function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function isDisallowedPseudoTicker(symbol: string) {
+  return DISALLOWED_PSEUDO_TICKERS.has(symbol.toUpperCase());
+}
+
+function sanitizeFocusTickersValue(value: string | null | undefined) {
+  if (!value) {
+    return null;
+  }
+
+  const unique = new Set<string>();
+  for (const segment of value.split(",")) {
+    const ticker = segment.trim().toUpperCase();
+    if (!ticker || isDisallowedPseudoTicker(ticker)) {
+      continue;
+    }
+
+    unique.add(ticker);
+  }
+
+  const nextTickers = Array.from(unique);
+  return nextTickers.length ? nextTickers.join(", ") : null;
 }
 
 function stripLeadingDisplayName(text: string, userName: string) {
@@ -568,6 +631,10 @@ function normalizeTickerSymbol(
     return null;
   }
 
+  if (isDisallowedPseudoTicker(upper)) {
+    return null;
+  }
+
   const isExplicitTicker = token.startsWith("$");
   const isUppercaseToken = stripped === upper;
   const isKnownMarketSymbol = KNOWN_MARKET_SYMBOLS.has(upper);
@@ -624,7 +691,8 @@ function parseSavedTickers(value: string | null) {
 
   return value
     .split(",")
-    .map((entry) => entry.trim())
+    .map((entry) => entry.trim().toUpperCase())
+    .filter((entry) => !isDisallowedPseudoTicker(entry))
     .filter(Boolean);
 }
 
@@ -637,6 +705,153 @@ function parseProfileTerms(value: string | null) {
     .split(",")
     .map((entry) => entry.trim())
     .filter(Boolean);
+}
+
+function normalizeRuleSegment(value: string) {
+  const normalized = normalizeWhitespace(
+    value
+      .replace(/^[\s\-–—•·*]+/, "")
+      .replace(/^\d+\s*[.)-]?\s*/, "")
+      .replace(/^["'`]+|["'`]+$/g, "")
+      .replace(/[;,.]+$/g, "")
+  );
+
+  if (!normalized) {
+    return null;
+  }
+
+  return normalized.charAt(0).toUpperCase() + normalized.slice(1);
+}
+
+function parseRuleSegments(value: string | null) {
+  if (!value) {
+    return [];
+  }
+
+  return value
+    .split(/\s*\|\s*|\n+/)
+    .map((segment) => normalizeRuleSegment(segment))
+    .filter((segment): segment is string => Boolean(segment));
+}
+
+function serializeRuleSegments(segments: string[]) {
+  const normalized = segments
+    .map((segment) => normalizeRuleSegment(segment))
+    .filter((segment): segment is string => Boolean(segment));
+
+  return normalized.length ? normalized.join(" | ") : null;
+}
+
+function mergeRuleSegments(existing: string | null, additions: string[], limit = 8) {
+  const merged: string[] = [];
+  const seen = new Set<string>();
+
+  for (const value of [...additions, ...parseRuleSegments(existing)]) {
+    const normalized = value.trim().toLowerCase();
+    if (!normalized || seen.has(normalized)) {
+      continue;
+    }
+
+    seen.add(normalized);
+    merged.push(value.trim());
+  }
+
+  return merged.slice(0, limit);
+}
+
+function extractRuleCandidates(rawValue: string) {
+  const prepared = rawValue
+    .replace(/\r/g, "")
+    .replace(/[•▪◦]+/g, "\n")
+    .replace(/\s*\n\s*/g, "\n");
+
+  const candidates = splitIntentClauses(prepared)
+    .map((segment) =>
+      segment
+        .replace(/^(?:and|also)\s+/i, "")
+        .replace(/\b(?:please|pls|thanks|thank you)\b/gi, "")
+        .trim()
+    )
+    .map((segment) => normalizeRuleSegment(segment))
+    .filter((segment): segment is string => Boolean(segment));
+
+  return [...new Set(candidates.map((segment) => segment.trim()))].slice(0, 8);
+}
+
+function extractExplicitRuleUpdate(
+  userMessage: string,
+  currentRules: string | null
+): { nextValue: string | null; touched: boolean } | null {
+  const replacePatterns = [
+    /\b(?:my|our)\s+(?:trading\s+)?(?:rules|rulebook|non[\s-]*negotiables?|guardrails?)\s+(?:are|is)\s*(.+)$/i,
+    /\b(?:set|save|remember|keep|update)\s+(?:my|our)\s+(?:trading\s+)?(?:rules|rulebook|non[\s-]*negotiables?|guardrails?)\s*(?:to|as)?\s*(.+)$/i,
+    /\b(?:my|our)\s+rule\s+is\s+(.+)$/i
+  ];
+  const mergePatterns = [
+    /\b(?:add|include)\s+(?:this\s+)?rule\s*(?::|-)?\s*(.+)$/i,
+    /\b(?:save|remember|keep)\s+(?:this\s+)?rule\s*(?::|-)?\s*(.+)$/i,
+    /\b(?:add|include)\s+(?:these\s+)?rules\s*(?::|-)?\s*(.+)$/i,
+    /\brule\s*(?::|-)\s*(.+)$/i
+  ];
+  const removePatterns = [
+    /\b(?:remove|delete|drop|forget|clear)\s+(?:this\s+)?rule\s*(?::|-)?\s*(.+)$/i,
+    /\b(?:remove|delete|drop|forget|clear)\s+(?:the\s+)?rule\s+(.+)$/i
+  ];
+
+  for (const pattern of removePatterns) {
+    const match = userMessage.match(pattern);
+    const rawValue = match?.[1]?.trim();
+    if (!rawValue) {
+      continue;
+    }
+
+    const currentSegments = parseRuleSegments(currentRules);
+    const targets = extractRuleCandidates(rawValue);
+    if (!currentSegments.length || !targets.length) {
+      return { nextValue: currentRules, touched: true };
+    }
+
+    const nextSegments = currentSegments.filter((segment) => {
+      const normalizedSegment = segment.toLowerCase();
+      return !targets.some((target) => {
+        const normalizedTarget = target.toLowerCase();
+        return (
+          normalizedSegment.includes(normalizedTarget) ||
+          normalizedTarget.includes(normalizedSegment)
+        );
+      });
+    });
+
+    return { nextValue: serializeRuleSegments(nextSegments), touched: true };
+  }
+
+  for (const pattern of replacePatterns) {
+    const match = userMessage.match(pattern);
+    const rawValue = match?.[1]?.trim();
+    if (!rawValue) {
+      continue;
+    }
+
+    return {
+      nextValue: serializeRuleSegments(extractRuleCandidates(rawValue)),
+      touched: true
+    };
+  }
+
+  for (const pattern of mergePatterns) {
+    const match = userMessage.match(pattern);
+    const rawValue = match?.[1]?.trim();
+    if (!rawValue) {
+      continue;
+    }
+
+    return {
+      nextValue: serializeRuleSegments(mergeRuleSegments(currentRules, extractRuleCandidates(rawValue))),
+      touched: true
+    };
+  }
+
+  return null;
 }
 
 function mergeTickers(existing: string[], additions: string[]) {
@@ -764,6 +979,12 @@ function isTickerFollowUpResponse(message: string, currentTickers: string[]) {
   );
 }
 
+function isTickerMemoryTargetClarification(message: string) {
+  return /\b(?:(?:my|the)\s+)?(?:focus(?:\s+tickers?)?|focus\s+list|watchlist|tickers?|symbols?|profile\s+memory|saved\s+profile|profile)\b/i.test(
+    message
+  );
+}
+
 function detectPendingTickerMemoryIntent(
   history: WorkspaceMessage[],
   currentTickers: string[]
@@ -804,6 +1025,38 @@ function detectPendingTickerMemoryIntent(
       }
     }
 
+    if (
+      isTickerMemoryTargetClarification(content) &&
+      /\b(?:trade|order|position|setup|watchlist|profile\s+memory|saved\s+profile)\b/i.test(content)
+    ) {
+      if (/\b(remove|drop|delete|untrack|clear)\b/i.test(content)) {
+        return "remove";
+      }
+
+      if (/\b(add|include|track|save|keep|alongside|pin|put)\b/i.test(content)) {
+        return "add";
+      }
+    }
+
+    if (
+      /\bwhat would you like me to add\b/i.test(content) &&
+      extractTickerMentions(content, {
+        allowLowercase: true,
+        currentTickers
+      }).length > 0
+    ) {
+      return "add";
+    }
+
+    if (
+      /\b(?:saved\s+focus\s+tickers?|focus\s+tickers?|watchlist)\b/i.test(content) &&
+      /\b(?:isn['’]?t|aren['’]?t|not in|don['’]?t see a saved focus-ticker change|right now i only have)\b/i.test(
+        content
+      )
+    ) {
+      return "remove";
+    }
+
     return null;
   }
 
@@ -819,6 +1072,47 @@ function detectPendingTickerMemoryIntent(
   }
 
   return null;
+}
+
+function hasTickerMemoryFollowUpIntent(
+  userMessage: string,
+  history: WorkspaceMessage[],
+  currentTickers: string[]
+) {
+  const recentIntent = detectPendingTickerMemoryIntent(history, currentTickers);
+  if (!recentIntent) {
+    return false;
+  }
+
+  if (isTickerFollowUpResponse(userMessage, currentTickers)) {
+    return true;
+  }
+
+  if (isTickerMemoryTargetClarification(userMessage)) {
+    return true;
+  }
+
+  const mentionedTickers = extractTickerMentions(userMessage, {
+    allowLowercase: true,
+    currentTickers
+  });
+  if (!mentionedTickers.length) {
+    return false;
+  }
+
+  if (recentIntent === "remove" && TICKER_REMOVE_INTENT.test(userMessage)) {
+    return true;
+  }
+
+  if (
+    recentIntent === "add" &&
+    (TICKER_ADD_INTENT.test(userMessage) ||
+      /\b(?:put|pin)\b[\s\S]{0,12}\b(?:in|into|on)\b/i.test(userMessage))
+  ) {
+    return true;
+  }
+
+  return false;
 }
 
 function isRecentTickerMemoryAcknowledgement(history: WorkspaceMessage[]) {
@@ -890,6 +1184,13 @@ function hasTradingThreadContext(history: WorkspaceMessage[], profile: TradingPr
 }
 
 function isTickerMemoryRequest(message: string, currentTickers: string[]) {
+  if (
+    PNL_CALENDAR_INTENT_HINT.test(message) &&
+    /\b(add|log|track|put|save|record)\b/i.test(message)
+  ) {
+    return false;
+  }
+
   const mentionedTickers = extractTickerMentions(message, {
     allowLowercase: true,
     currentTickers
@@ -898,6 +1199,16 @@ function isTickerMemoryRequest(message: string, currentTickers: string[]) {
     /\b(ticker|tickers|tickes|symbol|symbols|watchlist|watchlists|focus(?:\s+tickers?)?|profile|memory)\b/i.test(
       message
     );
+  const isCapabilityQuestion =
+    /\?\s*$/.test(message.trim()) &&
+    /\b(?:can|could|do|does|will|would|are)\b/i.test(message) &&
+    /\b(?:you|trader|this app)\b/i.test(message) &&
+    hasTickerMemoryKeywords &&
+    !mentionedTickers.length;
+
+  if (isCapabilityQuestion) {
+    return false;
+  }
 
   if (
     TICKER_REMOVE_INTENT.test(message) ||
@@ -909,6 +1220,13 @@ function isTickerMemoryRequest(message: string, currentTickers: string[]) {
     }
 
     if (mentionedTickers.length && TICKER_DIRECT_MEMORY_VERB.test(message)) {
+      return true;
+    }
+
+    if (
+      mentionedTickers.length &&
+      /\b(?:put|pin)\b[\s\S]{0,12}\b(?:in|into|on)\b/i.test(message)
+    ) {
       return true;
     }
 
@@ -1014,7 +1332,11 @@ function resolveTickerUpdate(
     });
 
     if (isRemovalClause) {
-      if (!clauseTickers.length && SINGULAR_TICKER_REFERENCE.test(clause)) {
+      if (
+        !clauseTickers.length &&
+        (SINGULAR_TICKER_REFERENCE.test(clause) ||
+          (recentIntent === "remove" && isTickerMemoryTargetClarification(clause)))
+      ) {
         const inferredTicker = findMostRecentTickerReference(history, currentTickers);
         if (inferredTicker) {
           removals.push(inferredTicker);
@@ -1032,6 +1354,19 @@ function resolveTickerUpdate(
     }
 
     if (isAdditionClause) {
+      if (
+        !clauseTickers.length &&
+        recentIntent === "add" &&
+        isTickerMemoryTargetClarification(clause)
+      ) {
+        const inferredTicker = findMostRecentTickerReference(history, currentTickers);
+        if (inferredTicker) {
+          additions.push(inferredTicker);
+          sawExplicitIntent = true;
+        }
+        continue;
+      }
+
       if (!clauseTickers.length) {
         continue;
       }
@@ -1043,9 +1378,25 @@ function resolveTickerUpdate(
     if (
       !isRemovalClause &&
       !isAdditionClause &&
-      recentIntent &&
-      isTickerFollowUpResponse(clause, currentTickers)
+      recentIntent
     ) {
+      if (!clauseTickers.length && isTickerMemoryTargetClarification(clause)) {
+        const inferredTicker = findMostRecentTickerReference(history, currentTickers);
+        if (inferredTicker) {
+          if (recentIntent === "remove") {
+            removals.push(inferredTicker);
+          } else {
+            additions.push(inferredTicker);
+          }
+          sawExplicitIntent = true;
+        }
+        continue;
+      }
+
+      if (!isTickerFollowUpResponse(clause, currentTickers)) {
+        continue;
+      }
+
       if (!clauseTickers.length) {
         continue;
       }
@@ -1080,6 +1431,167 @@ function resolveTickerUpdate(
   return nextTickers;
 }
 
+function formatTickerActionLabel(tickers: string[]) {
+  if (!tickers.length) {
+    return "that ticker";
+  }
+
+  if (tickers.length === 1) {
+    return tickers[0];
+  }
+
+  if (tickers.length === 2) {
+    return `${tickers[0]} and ${tickers[1]}`;
+  }
+
+  return `${tickers.slice(0, -1).join(", ")}, and ${tickers.at(-1)}`;
+}
+
+export function buildFocusTickerQuickActionsForTurn(input: {
+  history: WorkspaceMessage[];
+  nextProfile: TradingProfile;
+  previousProfile: TradingProfile;
+  profileUpdateApplied: boolean;
+  userMessage: string;
+}): WorkspaceQuickAction[] {
+  const previousTickers = parseSavedTickers(input.previousProfile.focus_tickers);
+  const recentIntent = detectPendingTickerMemoryIntent(input.history, previousTickers);
+  const inferredTicker = recentIntent
+    ? findMostRecentTickerReference(input.history, previousTickers)
+    : null;
+
+  if (
+    input.profileUpdateApplied &&
+    input.previousProfile.focus_tickers !== input.nextProfile.focus_tickers
+  ) {
+    return [];
+  }
+
+  const mentionedTickers = extractTickerMentions(input.userMessage, {
+    allowLowercase: true,
+    currentTickers: previousTickers
+  });
+
+  if (
+    inferredTicker &&
+    recentIntent === "add" &&
+    !previousTickers.includes(inferredTicker) &&
+    (isTickerMemoryTargetClarification(input.userMessage) ||
+      (!mentionedTickers.length &&
+        /\b(?:yes|yeah[a-z]*|yep|yup|sure|ok(?:ay)?|do it|go ahead|that one|this one|that|this)\b/i.test(
+          input.userMessage
+        )))
+  ) {
+    return [
+      {
+        kind: "submit",
+        label: `Add ${inferredTicker} to focus tickers`,
+        prompt: `Add ${inferredTicker} to my focus tickers.`
+      }
+    ];
+  }
+
+  if (
+    inferredTicker &&
+    recentIntent === "remove" &&
+    previousTickers.includes(inferredTicker) &&
+    (isTickerMemoryTargetClarification(input.userMessage) ||
+      (!mentionedTickers.length &&
+        /\b(?:yes|yeah[a-z]*|yep|yup|sure|ok(?:ay)?|do it|go ahead|that one|this one|that|this)\b/i.test(
+          input.userMessage
+        )))
+  ) {
+    return [
+      {
+        kind: "submit",
+        label: `Remove ${inferredTicker} from focus tickers`,
+        prompt: `Remove ${inferredTicker} from my focus tickers.`
+      }
+    ];
+  }
+
+  if (!mentionedTickers.length) {
+    if (recentIntent && isTickerMemoryTargetClarification(input.userMessage)) {
+      if (!inferredTicker) {
+        return [];
+      }
+
+      if (recentIntent === "add" && !previousTickers.includes(inferredTicker)) {
+        return [
+          {
+            kind: "submit",
+            label: `Add ${inferredTicker} to focus tickers`,
+            prompt: `Add ${inferredTicker} to my focus tickers.`
+          }
+        ];
+      }
+
+      if (recentIntent === "remove" && previousTickers.includes(inferredTicker)) {
+        return [
+          {
+            kind: "submit",
+            label: `Remove ${inferredTicker} from focus tickers`,
+            prompt: `Remove ${inferredTicker} from my focus tickers.`
+          }
+        ];
+      }
+    }
+
+    return [];
+  }
+
+  if (isAmbiguousBareTickerFollowUp(input.userMessage, input.history, previousTickers)) {
+    return [
+      {
+        kind: "submit",
+        label: `Add ${formatTickerActionLabel(mentionedTickers)} to focus tickers`,
+        prompt: `Add ${mentionedTickers.join(", ")} to my focus tickers.`
+      }
+    ];
+  }
+
+  if (
+    mentionedTickers.length &&
+    TICKER_ADD_INTENT.test(input.userMessage) &&
+    !isTickerMemoryRequest(input.userMessage, previousTickers) &&
+    !PNL_CALENDAR_INTENT_HINT.test(input.userMessage)
+  ) {
+    return [
+      {
+        kind: "submit",
+        label: `Add ${formatTickerActionLabel(mentionedTickers)} to focus tickers`,
+        prompt: `Add ${mentionedTickers.join(", ")} to my focus tickers.`
+      }
+    ];
+  }
+
+  if (!isTickerMemoryRequest(input.userMessage, previousTickers)) {
+    return [];
+  }
+
+  if (TICKER_REMOVE_INTENT.test(input.userMessage)) {
+    return [
+      {
+        kind: "submit",
+        label: `Remove ${formatTickerActionLabel(mentionedTickers)} from focus tickers`,
+        prompt: `Remove ${mentionedTickers.join(", ")} from my focus tickers.`
+      }
+    ];
+  }
+
+  if (TICKER_ADD_INTENT.test(input.userMessage) || /\b(?:put|pin)\b[\s\S]{0,12}\b(?:in|into|on)\b/i.test(input.userMessage)) {
+    return [
+      {
+        kind: "submit",
+        label: `Add ${formatTickerActionLabel(mentionedTickers)} to focus tickers`,
+        prompt: `Add ${mentionedTickers.join(", ")} to my focus tickers.`
+      }
+    ];
+  }
+
+  return [];
+}
+
 export function summarizeProfileUpdate(previous: TradingProfile, next: TradingProfile) {
   const changes: string[] = [];
   const formatLabel = (field: keyof TradingProfile) =>
@@ -1099,7 +1611,9 @@ export function summarizeProfileUpdate(previous: TradingProfile, next: TradingPr
     }
 
     if (next[field]) {
-      changes.push(`${formatLabel(field)}: ${next[field]}`);
+      changes.push(
+        `${formatLabel(field)}: ${formatProfileNotificationValue(field, next[field]) ?? next[field]}`
+      );
     } else {
       changes.push(`${formatLabel(field)} cleared`);
     }
@@ -1115,6 +1629,10 @@ function formatProfileNotificationValue(field: keyof TradingProfile, value: stri
 
   if (field === "focus_tickers") {
     return parseSavedTickers(value).join(", ");
+  }
+
+  if (field === "trading_rules") {
+    return parseRuleSegments(value).join(" · ");
   }
 
   return value
@@ -1458,7 +1976,9 @@ function buildVerifiedProfileChangeFacts(previous: TradingProfile, next: Trading
         return `${PROFILE_FIELD_LABELS[field]} cleared`;
       }
 
-      return `${PROFILE_FIELD_LABELS[field]} = ${nextValue}`;
+      return `${PROFILE_FIELD_LABELS[field]} = ${
+        formatProfileNotificationValue(field, nextValue) ?? nextValue
+      }`;
     }
   );
   const facts: string[] = [];
@@ -1479,7 +1999,7 @@ function buildVerifiedProfileChangeFacts(previous: TradingProfile, next: Trading
 }
 
 function replyContainsProfileSaveClaim(reply: string) {
-  return /(?:\b(?:save|saved|add|added|remove|removed|clear|cleared|update|updated)\b[\s\S]{0,48}\b(?:focus tickers?|watchlist|profile memory|saved profile|profile|trading goal|goal|risk profile|risk tolerance|strategy style|preferred assets|experience level)\b)|(?:\b(?:focus tickers?|watchlist|profile memory|saved profile|profile|trading goal|goal|risk profile|risk tolerance|strategy style|preferred assets|experience level)\b[\s\S]{0,48}\b(?:save|saved|add|added|remove|removed|clear|cleared|update|updated)\b)|(?:didn['’]t save[\s\S]{0,40}\b(?:focus tickers?|watchlist|profile|trading goal|goal|risk profile|risk tolerance|strategy style|preferred assets|experience level)\b)/i.test(
+  return /(?:\b(?:save|saved|add|added|remove|removed|clear|cleared|update|updated)\b[\s\S]{0,48}\b(?:focus tickers?|watchlist|profile memory|saved profile|profile|trading goal|goal|risk profile|risk tolerance|strategy style|preferred assets|experience level|trading rules?|rules?|rulebook|non[\s-]*negotiables?)\b)|(?:\b(?:focus tickers?|watchlist|profile memory|saved profile|profile|trading goal|goal|risk profile|risk tolerance|strategy style|preferred assets|experience level|trading rules?|rules?|rulebook|non[\s-]*negotiables?)\b[\s\S]{0,48}\b(?:save|saved|add|added|remove|removed|clear|cleared|update|updated)\b)|(?:didn['’]t save[\s\S]{0,40}\b(?:focus tickers?|watchlist|profile|trading goal|goal|risk profile|risk tolerance|strategy style|preferred assets|experience level|trading rules?|rules?|rulebook|non[\s-]*negotiables?)\b)/i.test(
     reply
   );
 }
@@ -1512,9 +2032,15 @@ function isExplicitProfileMemoryChangeRequest(
     return true;
   }
 
+  if (hasTickerMemoryFollowUpIntent(userMessage, history, currentTickers)) {
+    return true;
+  }
+
   if (
-    detectPendingTickerMemoryIntent(history, currentTickers) &&
-    isTickerFollowUpResponse(userMessage, currentTickers)
+    PROFILE_REFERENCE_PATTERNS.trading_rules.test(userMessage) &&
+    /\b(?:my|our)\s+(?:trading\s+)?(?:rules|rulebook|non[\s-]*negotiables?|guardrails?)\s+(?:are|is)\b/i.test(
+      userMessage
+    )
   ) {
     return true;
   }
@@ -1571,6 +2097,18 @@ function buildNoProfileChangeReply(
     );
   }
 
+  if (requestedField === "trading_rules") {
+    const currentRulesCopy = profile.trading_rules
+      ? `Right now your saved rules are ${parseRuleSegments(profile.trading_rules).join(" · ")}.`
+      : "Right now you do not have saved trading rules yet.";
+
+    return maybeStripDisplayName(
+      `I don't see a saved rules change reflected for this turn. ${currentRulesCopy} If you want me to update them, say something explicit like "save this rule: stop after 2 losses" or "remove my rules."`,
+      history,
+      userName
+    );
+  }
+
   if (requestedField === "preferred_assets") {
     const currentAssetsCopy = profile.preferred_assets
       ? `Right now your saved preferred assets are ${profile.preferred_assets}.`
@@ -1603,6 +2141,28 @@ function buildNoProfileChangeReply(
     currentTickers
   });
   const exampleTicker = referencedTickers[0] ?? "NVDA";
+  const removeRequested = TICKER_REMOVE_INTENT.test(userMessage);
+
+  if (removeRequested && referencedTickers.length) {
+    const missingRequestedTickers = referencedTickers.filter(
+      (ticker) => !currentTickers.includes(ticker)
+    );
+
+    if (missingRequestedTickers.length === referencedTickers.length) {
+      const tickerCopy =
+        missingRequestedTickers.length > 1
+          ? `${missingRequestedTickers.slice(0, -1).join(", ")} and ${missingRequestedTickers.at(-1)}`
+          : missingRequestedTickers[0];
+
+      return maybeStripDisplayName(
+        `${tickerCopy} ${
+          missingRequestedTickers.length > 1 ? "aren't" : "isn't"
+        } in your saved focus tickers right now. ${currentTickerCopy}`,
+        history,
+        userName
+      );
+    }
+  }
 
   return maybeStripDisplayName(
     `I don't see a saved focus-ticker change reflected for this turn. ${currentTickerCopy} If you want me to update it, say something explicit like "add ${exampleTicker} to my focus tickers" or "remove ${exampleTicker} from my focus tickers."`,
@@ -1802,6 +2362,10 @@ function buildCoachDynamicContext(input: CoachReplyInput) {
     lines.push(`Verified web context for this turn: ${input.webSearchBrief}`);
   }
 
+  if (input.tradeCalendarBrief) {
+    lines.push(`Verified P&L calendar context for this turn: ${input.tradeCalendarBrief}`);
+  }
+
   const attachmentSummary = summarizeAttachment(input.attachmentName, input.attachmentType);
   if (attachmentSummary) {
     lines.push(attachmentSummary);
@@ -1862,7 +2426,7 @@ function buildCoachLLMRequest(input: CoachReplyInput) {
     return null;
   }
 
-  const model = process.env.OPENAI_MODEL || "gpt-4.1-mini";
+  const model = process.env.OPENAI_MODEL || "gpt-5.4-mini";
 
   const systemText = [SYSTEM_PROMPT, buildCoachDynamicContext(input)].join("\n\n");
 
@@ -1983,7 +2547,7 @@ async function callConversationTitleLLM(input: ConversationTitleInput) {
   }
 
   const client = new OpenAI({ apiKey });
-  const model = process.env.OPENAI_MODEL || "gpt-4.1-mini";
+  const model = process.env.OPENAI_MODEL || "gpt-5.4-mini";
 
   try {
     const response = await client.chat.completions.create({
@@ -2024,8 +2588,7 @@ export function extractProfileUpdates(
   const tradingRelevant = isTradingRelevantMessage(userMessage, history, currentProfile);
   const tickerMemoryRequest =
     isTickerMemoryRequest(userMessage, currentTickers) ||
-    (Boolean(detectPendingTickerMemoryIntent(history, currentTickers)) &&
-      isTickerFollowUpResponse(userMessage, currentTickers));
+    hasTickerMemoryFollowUpIntent(userMessage, history, currentTickers);
 
   if (tickerMemoryRequest) {
     const nextTickers = resolveTickerUpdate(userMessage, currentTickers, history);
@@ -2040,6 +2603,13 @@ export function extractProfileUpdates(
 
   for (const field of clearedFields) {
     profile[field] = null;
+  }
+
+  if (!clearedFields.includes("trading_rules")) {
+    const explicitRuleUpdate = extractExplicitRuleUpdate(userMessage, currentProfile.trading_rules);
+    if (explicitRuleUpdate?.touched) {
+      profile.trading_rules = explicitRuleUpdate.nextValue;
+    }
   }
 
   if (!tradingRelevant) {
@@ -2094,6 +2664,9 @@ export function extractProfileUpdates(
 
 export async function generateCoachReply(input: CoachReplyInput) {
   const currentTickers = parseSavedTickers(input.profile.focus_tickers);
+  const explicitProfileMemoryChange =
+    !input.profileUpdateApplied &&
+    isExplicitProfileMemoryChangeRequest(input.userMessage, input.profile, input.history);
 
   if (isAmbiguousBareTickerFollowUp(input.userMessage, input.history, currentTickers)) {
     return buildAmbiguousTickerTurnReply(
@@ -2106,6 +2679,15 @@ export async function generateCoachReply(input: CoachReplyInput) {
 
   if (isClearlyOffTopicMessage(input.userMessage, input.history, input.profile)) {
     return fallbackReply(input);
+  }
+
+  if (explicitProfileMemoryChange) {
+    return buildNoProfileChangeReply(
+      input.userName,
+      input.userMessage,
+      input.profile,
+      input.history
+    );
   }
 
   const webSearchBrief = shouldUseFallbackWebSearch(
@@ -2124,19 +2706,6 @@ export async function generateCoachReply(input: CoachReplyInput) {
   });
   if (liveReply) {
     const sanitizedLiveReply = maybeStripDisplayName(liveReply, input.history, input.userName);
-    if (
-      !input.profileUpdateApplied &&
-      isExplicitProfileMemoryChangeRequest(input.userMessage, input.profile, input.history) &&
-      replyContainsProfileSaveClaim(sanitizedLiveReply)
-    ) {
-      return buildNoProfileChangeReply(
-        input.userName,
-        input.userMessage,
-        input.profile,
-        input.history
-      );
-    }
-
     return sanitizedLiveReply;
   }
 
@@ -2148,6 +2717,9 @@ export async function generateCoachReply(input: CoachReplyInput) {
 
 export async function generateCoachReplyResult(input: CoachReplyInput, signal?: AbortSignal) {
   const currentTickers = parseSavedTickers(input.profile.focus_tickers);
+  const explicitProfileMemoryChange =
+    !input.profileUpdateApplied &&
+    isExplicitProfileMemoryChangeRequest(input.userMessage, input.profile, input.history);
 
   if (isAmbiguousBareTickerFollowUp(input.userMessage, input.history, currentTickers)) {
     return {
@@ -2168,6 +2740,18 @@ export async function generateCoachReplyResult(input: CoachReplyInput, signal?: 
     } satisfies CoachReplyResult;
   }
 
+  if (explicitProfileMemoryChange) {
+    return {
+      mode: "reply",
+      reply: buildNoProfileChangeReply(
+        input.userName,
+        input.userMessage,
+        input.profile,
+        input.history
+      )
+    } satisfies CoachReplyResult;
+  }
+
   const webSearchBrief = shouldUseFallbackWebSearch(
     input.userMessage,
     input.history,
@@ -2183,36 +2767,6 @@ export async function generateCoachReplyResult(input: CoachReplyInput, signal?: 
     webSearchBrief
   };
   const fallbackText = fallbackReply(resolvedInput);
-
-  if (
-    !input.profileUpdateApplied &&
-    isExplicitProfileMemoryChangeRequest(input.userMessage, input.profile, input.history)
-  ) {
-    const guardedReply = await callLLM(resolvedInput, signal);
-    if (guardedReply) {
-      if (replyContainsProfileSaveClaim(guardedReply)) {
-        return {
-          mode: "reply",
-          reply: buildNoProfileChangeReply(
-            input.userName,
-            input.userMessage,
-            input.profile,
-            input.history
-          )
-        } satisfies CoachReplyResult;
-      }
-
-      return {
-        mode: "reply",
-        reply: maybeStripDisplayName(guardedReply, input.history, input.userName)
-      } satisfies CoachReplyResult;
-    }
-
-    return {
-      mode: "reply",
-      reply: maybeStripDisplayName(fallbackText, input.history, input.userName)
-    } satisfies CoachReplyResult;
-  }
 
   const stream = await streamLLM(resolvedInput, signal);
   if (!stream) {

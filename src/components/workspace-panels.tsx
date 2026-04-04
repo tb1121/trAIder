@@ -1,3 +1,6 @@
+"use client";
+
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import type { TradingProfile, WorkspaceMessage } from "@/lib/coach";
 import type { ConversationSummary } from "@/lib/data";
@@ -21,6 +24,16 @@ type AnalysisModule = {
   copy: string;
   label: string;
   status: string;
+};
+
+type PnlGranularity = "daily" | "monthly" | "yearly";
+
+type PnlBucket = {
+  key: string;
+  label: string;
+  pnlAmount: number;
+  sortValue: number;
+  tradeCount: number;
 };
 
 function buildWorkspaceHref(
@@ -86,6 +99,28 @@ function formatTradeDay(value: string) {
   }).format(parsed);
 }
 
+function formatTradeMonth(value: Date) {
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    year: "2-digit"
+  }).format(value);
+}
+
+function formatCompactPnlAmount(value: number) {
+  const sign = value > 0 ? "+" : value < 0 ? "-" : "";
+  const absolute = Math.abs(value);
+  const formatted =
+    absolute >= 1000
+      ? new Intl.NumberFormat("en-US", {
+          notation: "compact",
+          maximumFractionDigits: 1,
+          minimumFractionDigits: 0
+        }).format(absolute)
+      : absolute.toFixed(0);
+
+  return `${sign}$${formatted}`;
+}
+
 function buildCalendarDateKey(year: number, monthIndex: number, day: number) {
   return `${year}-${String(monthIndex + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
 }
@@ -145,6 +180,258 @@ function buildMonthCalendar(entries: TradeCalendarEntry[]) {
   };
 }
 
+function buildTradeEntryLabel(entry: TradeCalendarEntry) {
+  return entry.tickers.length === 1 ? entry.tickers[0] : entry.tickers.join(", ");
+}
+
+function buildTradeDayBreakdown(entries: TradeCalendarEntry[]) {
+  const grouped = new Map<
+    string,
+    { label: string; notes: string[]; pnlAmount: number; tradeCount: number }
+  >();
+
+  for (const entry of entries) {
+    const label = buildTradeEntryLabel(entry);
+    const bucket = grouped.get(label) ?? {
+      label,
+      notes: [],
+      pnlAmount: 0,
+      tradeCount: 0
+    };
+
+    bucket.pnlAmount += entry.pnlAmount;
+    bucket.tradeCount += 1;
+    if (entry.notes) {
+      bucket.notes.push(entry.notes);
+    }
+
+    grouped.set(label, bucket);
+  }
+
+  return [...grouped.values()].sort((left, right) => {
+    if (right.pnlAmount !== left.pnlAmount) {
+      return right.pnlAmount - left.pnlAmount;
+    }
+
+    return left.label.localeCompare(right.label);
+  });
+}
+
+function buildPnlBuckets(entries: TradeCalendarEntry[], granularity: PnlGranularity) {
+  const grouped = new Map<string, PnlBucket>();
+
+  for (const entry of entries) {
+    const parsed = new Date(`${entry.tradedOn}T00:00:00`);
+    if (Number.isNaN(parsed.getTime())) {
+      continue;
+    }
+
+    let key = entry.tradedOn;
+    let label = formatTradeDay(entry.tradedOn);
+    let sortValue = parsed.getTime();
+
+    if (granularity === "monthly") {
+      key = `${parsed.getFullYear()}-${String(parsed.getMonth() + 1).padStart(2, "0")}`;
+      label = formatTradeMonth(new Date(parsed.getFullYear(), parsed.getMonth(), 1));
+      sortValue = new Date(parsed.getFullYear(), parsed.getMonth(), 1).getTime();
+    } else if (granularity === "yearly") {
+      key = String(parsed.getFullYear());
+      label = key;
+      sortValue = new Date(parsed.getFullYear(), 0, 1).getTime();
+    }
+
+    const bucket = grouped.get(key) ?? {
+      key,
+      label,
+      pnlAmount: 0,
+      sortValue,
+      tradeCount: 0
+    };
+
+    bucket.pnlAmount += entry.pnlAmount;
+    bucket.tradeCount += 1;
+    grouped.set(key, bucket);
+  }
+
+  const limit = granularity === "daily" ? 21 : granularity === "monthly" ? 12 : 6;
+
+  return [...grouped.values()]
+    .sort((left, right) => left.sortValue - right.sortValue)
+    .slice(-limit);
+}
+
+function buildPnlPerformanceStats(
+  entries: TradeCalendarEntry[],
+  buckets: PnlBucket[],
+  granularity: PnlGranularity
+) {
+  const totalRealized = entries.reduce((sum, entry) => sum + entry.pnlAmount, 0);
+  const average = buckets.length
+    ? buckets.reduce((sum, bucket) => sum + bucket.pnlAmount, 0) / buckets.length
+    : 0;
+  const bestBucket = buckets.reduce<PnlBucket | null>(
+    (best, bucket) => (!best || bucket.pnlAmount > best.pnlAmount ? bucket : best),
+    null
+  );
+  const worstBucket = buckets.reduce<PnlBucket | null>(
+    (worst, bucket) => (!worst || bucket.pnlAmount < worst.pnlAmount ? bucket : worst),
+    null
+  );
+  const periodLabel =
+    granularity === "daily" ? "day" : granularity === "monthly" ? "month" : "year";
+
+  return [
+    {
+      label: "Realized net",
+      tone: totalRealized > 0 ? "positive" : totalRealized < 0 ? "negative" : "neutral",
+      value: formatTradePnlAmount(totalRealized)
+    },
+    {
+      label: `Avg ${periodLabel}`,
+      tone: average > 0 ? "positive" : average < 0 ? "negative" : "neutral",
+      value: buckets.length ? formatTradePnlAmount(average) : "Waiting"
+    },
+    {
+      label: `Best ${periodLabel}`,
+      tone:
+        (bestBucket?.pnlAmount ?? 0) > 0
+          ? "positive"
+          : (bestBucket?.pnlAmount ?? 0) < 0
+            ? "negative"
+            : "neutral",
+      value: bestBucket ? `${bestBucket.label} · ${formatTradePnlAmount(bestBucket.pnlAmount)}` : "Waiting"
+    },
+    {
+      label: `Worst ${periodLabel}`,
+      tone:
+        (worstBucket?.pnlAmount ?? 0) > 0
+          ? "positive"
+          : (worstBucket?.pnlAmount ?? 0) < 0
+            ? "negative"
+            : "neutral",
+      value: worstBucket
+        ? `${worstBucket.label} · ${formatTradePnlAmount(worstBucket.pnlAmount)}`
+        : "Waiting"
+    }
+  ];
+}
+
+function PnlPerformanceChart({
+  buckets,
+  granularity
+}: {
+  buckets: PnlBucket[];
+  granularity: PnlGranularity;
+}) {
+  const width = 960;
+  const height = 260;
+  const padding = {
+    bottom: 34,
+    left: 56,
+    right: 16,
+    top: 20
+  };
+
+  if (!buckets.length) {
+    return (
+      <div className="workspace-analysis-chart-empty">
+        <p>No logged trades yet.</p>
+        <span>
+          Once trades are saved from chat, {granularity} P&amp;L will chart itself here.
+        </span>
+      </div>
+    );
+  }
+
+  const values = buckets.map((bucket) => bucket.pnlAmount);
+  const maxValue = Math.max(...values, 0);
+  const minValue = Math.min(...values, 0);
+  const range = maxValue - minValue || 1;
+  const plotWidth = width - padding.left - padding.right;
+  const plotHeight = height - padding.top - padding.bottom;
+  const slotWidth = plotWidth / buckets.length;
+  const barWidth = Math.min(44, Math.max(18, slotWidth * 0.56));
+  const baselineY = padding.top + ((maxValue - 0) / range) * plotHeight;
+  const tickValues = [maxValue, (maxValue + minValue) / 2, minValue];
+
+  const yForValue = (value: number) => padding.top + ((maxValue - value) / range) * plotHeight;
+
+  return (
+    <div className="workspace-analysis-chart-shell">
+      <svg
+        aria-label={`${granularity} profit and loss chart`}
+        className="workspace-analysis-chart"
+        role="img"
+        viewBox={`0 0 ${width} ${height}`}
+      >
+        <defs>
+          <linearGradient id="workspace-analysis-chart-positive" x1="0" x2="0" y1="0" y2="1">
+            <stop offset="0%" stopColor="rgba(64, 202, 121, 0.98)" />
+            <stop offset="100%" stopColor="rgba(15, 159, 85, 0.9)" />
+          </linearGradient>
+          <linearGradient id="workspace-analysis-chart-negative" x1="0" x2="0" y1="0" y2="1">
+            <stop offset="0%" stopColor="rgba(255, 128, 141, 0.98)" />
+            <stop offset="100%" stopColor="rgba(209, 67, 67, 0.9)" />
+          </linearGradient>
+        </defs>
+        {tickValues.map((tick, index) => {
+          const y = yForValue(tick);
+          return (
+            <g key={`${tick}-${index}`}>
+              <line
+                className="workspace-analysis-chart-gridline"
+                x1={padding.left}
+                x2={width - padding.right}
+                y1={y}
+                y2={y}
+              />
+              <text className="workspace-analysis-chart-axis-label" x={12} y={y + 4}>
+                {formatCompactPnlAmount(tick)}
+              </text>
+            </g>
+          );
+        })}
+
+        <line
+          className="workspace-analysis-chart-baseline"
+          x1={padding.left}
+          x2={width - padding.right}
+          y1={baselineY}
+          y2={baselineY}
+        />
+
+        {buckets.map((bucket, index) => {
+          const x = padding.left + slotWidth * index + (slotWidth - barWidth) / 2;
+          const valueY = yForValue(bucket.pnlAmount);
+          const barY = bucket.pnlAmount >= 0 ? valueY : baselineY;
+          const barHeight = Math.max(Math.abs(valueY - baselineY), 3);
+          const labelX = padding.left + slotWidth * index + slotWidth / 2;
+
+          return (
+            <g key={bucket.key}>
+              <title>{`${bucket.label}: ${formatTradePnlAmount(bucket.pnlAmount)} across ${bucket.tradeCount} trade${bucket.tradeCount === 1 ? "" : "s"}`}</title>
+              <rect
+                className={`workspace-analysis-chart-bar ${
+                  bucket.pnlAmount >= 0 ? "positive" : "negative"
+                }`}
+                height={barHeight}
+                rx={barWidth / 3}
+                ry={barWidth / 3}
+                width={barWidth}
+                x={x}
+                y={barY}
+              />
+              <text className="workspace-analysis-chart-column-label" x={labelX} y={height - 10}>
+                {bucket.label}
+              </text>
+            </g>
+          );
+        })}
+      </svg>
+    </div>
+  );
+}
+
 function buildAnalysisModules(profile: TradingProfile, userMessageCount: number): AnalysisModule[] {
   return [
     {
@@ -157,9 +444,13 @@ function buildAnalysisModules(profile: TradingProfile, userMessageCount: number)
     {
       label: "Rulebook engine",
       status:
-        profile.risk_tolerance || profile.trading_goal ? "Primed" : "Waiting on boundaries",
+        profile.trading_rules
+          ? "Rule memory live"
+          : profile.risk_tolerance || profile.trading_goal
+            ? "Primed"
+            : "Waiting on boundaries",
       copy:
-        "The first premium unlock is a real rulebook: max risk, daily drawdown, and non-negotiables that can be enforced later."
+        "The first premium unlock is a real rulebook: max risk, daily drawdown, and non-negotiables that the desk can remember now and enforce later."
     },
     {
       label: "Playbook patterns",
@@ -252,6 +543,13 @@ export function WorkspaceAnalysisPanel({
   const riskFocus = titleizePhrase(profile.risk_tolerance) ?? "Risk profile still forming";
   const nextChatTarget = activeConversationId ?? conversations[0]?.id ?? null;
   const monthCalendar = buildMonthCalendar(tradeCalendarEntries);
+  const selectableCalendarKeys = useMemo(
+    () => monthCalendar.cells.filter((cell) => cell.entries.length).map((cell) => cell.key),
+    [monthCalendar.cells]
+  );
+  const latestCalendarKey = selectableCalendarKeys.at(-1) ?? null;
+  const [selectedCalendarKey, setSelectedCalendarKey] = useState<string | null>(latestCalendarKey);
+  const [pnlGranularity, setPnlGranularity] = useState<PnlGranularity>("daily");
   const monthTradeCount = monthCalendar.cells.reduce(
     (count, cell) => count + cell.entries.length,
     0
@@ -266,6 +564,31 @@ export function WorkspaceAnalysisPanel({
     })
     .reduce((sum, entry) => sum + entry.pnlAmount, 0);
   const recentTradeEntries = tradeCalendarEntries.slice(0, 5);
+  const selectedCalendarCell =
+    monthCalendar.cells.find((cell) => cell.key === selectedCalendarKey && cell.entries.length) ?? null;
+  const selectedDayBreakdown = selectedCalendarCell
+    ? buildTradeDayBreakdown(selectedCalendarCell.entries)
+    : [];
+  const selectedDayLabel = selectedCalendarCell ? formatTradeDay(selectedCalendarCell.key) : null;
+  const pnlBuckets = useMemo(
+    () => buildPnlBuckets(tradeCalendarEntries, pnlGranularity),
+    [pnlGranularity, tradeCalendarEntries]
+  );
+  const pnlPerformanceStats = useMemo(
+    () => buildPnlPerformanceStats(tradeCalendarEntries, pnlBuckets, pnlGranularity),
+    [pnlBuckets, pnlGranularity, tradeCalendarEntries]
+  );
+
+  useEffect(() => {
+    if (!selectableCalendarKeys.length) {
+      setSelectedCalendarKey(null);
+      return;
+    }
+
+    setSelectedCalendarKey((current) =>
+      current && selectableCalendarKeys.includes(current) ? current : latestCalendarKey
+    );
+  }, [latestCalendarKey, selectableCalendarKeys]);
 
   return (
     <section className="workspace-section-panel workspace-analysis-panel">
@@ -314,6 +637,50 @@ export function WorkspaceAnalysisPanel({
       </div>
 
       <div className="workspace-analysis-grid">
+        <article className="workspace-analysis-card workspace-analysis-card-wide workspace-analysis-performance-card">
+          <div className="workspace-analysis-card-top workspace-analysis-performance-top">
+            <div>
+              <p className="workspace-analysis-card-label">P&amp;L performance</p>
+              <h3 className="workspace-analysis-calendar-title">How the desk is performing over time</h3>
+            </div>
+            <div className="workspace-analysis-toggle" role="tablist" aria-label="P&L aggregation">
+              {([
+                ["daily", "Daily"],
+                ["monthly", "Monthly"],
+                ["yearly", "Yearly"]
+              ] as const).map(([value, label]) => (
+                <button
+                  aria-selected={pnlGranularity === value}
+                  className={`workspace-analysis-toggle-button ${
+                    pnlGranularity === value ? "active" : ""
+                  }`}
+                  key={value}
+                  onClick={() => setPnlGranularity(value)}
+                  role="tab"
+                  type="button"
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <p className="workspace-analysis-card-copy">
+            Switch between daily, monthly, and yearly rollups to see whether your desk is building
+            consistency or just catching random green days.
+          </p>
+          <div className="workspace-analysis-performance-stats">
+            {pnlPerformanceStats.map((stat) => (
+              <div className="workspace-analysis-performance-stat" key={stat.label}>
+                <span className="workspace-analysis-card-label">{stat.label}</span>
+                <strong className={`workspace-analysis-performance-stat-value ${stat.tone ?? "neutral"}`}>
+                  {stat.value}
+                </strong>
+              </div>
+            ))}
+          </div>
+          <PnlPerformanceChart buckets={pnlBuckets} granularity={pnlGranularity} />
+        </article>
+
         <article className="workspace-analysis-card workspace-analysis-card-wide workspace-analysis-calendar-card">
           <div className="workspace-analysis-card-top">
             <div>
@@ -335,11 +702,20 @@ export function WorkspaceAnalysisPanel({
           </div>
           <div className="workspace-analysis-calendar-grid">
             {monthCalendar.cells.map((cell) => (
-              <article
+              <button
                 className={`workspace-analysis-calendar-cell ${
                   cell.entries.length ? "has-entry" : ""
-                } ${cell.total > 0 ? "positive" : cell.total < 0 ? "negative" : ""}`}
+                } ${cell.total > 0 ? "positive" : cell.total < 0 ? "negative" : ""} ${
+                  selectedCalendarKey === cell.key ? "selected" : ""
+                } ${cell.entries.length ? "interactive" : "empty"}`}
+                disabled={!cell.entries.length}
                 key={cell.key}
+                onClick={() => {
+                  if (cell.entries.length) {
+                    setSelectedCalendarKey(cell.key);
+                  }
+                }}
+                type="button"
               >
                 {cell.label ? (
                   <>
@@ -360,9 +736,44 @@ export function WorkspaceAnalysisPanel({
                     ) : null}
                   </>
                 ) : null}
-              </article>
+              </button>
             ))}
           </div>
+          {selectedCalendarCell ? (
+            <div className="workspace-analysis-calendar-detail">
+              <div className="workspace-analysis-calendar-detail-top">
+                <div>
+                  <p className="workspace-analysis-card-label">Selected day</p>
+                  <h4 className="workspace-analysis-calendar-detail-title">{selectedDayLabel}</h4>
+                </div>
+                <span className="workspace-analysis-card-status">
+                  {formatTradePnlAmount(selectedCalendarCell.total)}
+                </span>
+              </div>
+              <div className="workspace-analysis-calendar-detail-list">
+                {selectedDayBreakdown.map((entry) => (
+                  <div className="workspace-analysis-calendar-detail-row" key={entry.label}>
+                    <div>
+                      <strong>{entry.label}</strong>
+                      <p>
+                        {entry.tradeCount === 1
+                          ? "1 logged trade"
+                          : `${entry.tradeCount} logged trades`}
+                      </p>
+                      {entry.notes[0] ? (
+                        <span className="workspace-analysis-calendar-detail-note">
+                          {entry.notes[0]}
+                        </span>
+                      ) : null}
+                    </div>
+                    <strong className={entry.pnlAmount >= 0 ? "positive" : "negative"}>
+                      {formatTradePnlAmount(entry.pnlAmount)}
+                    </strong>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : null}
         </article>
 
         <article className="workspace-analysis-card workspace-analysis-card-wide">
